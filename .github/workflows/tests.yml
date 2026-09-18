@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # المحرك والاختبارات تعمل بالمكتبة القياسية فقط — لا تثبيت تبعيات ولا شبكة
+      - name: Compile all sources
+        run: python -m compileall -q apex_top100 APEX_ULTIMATE.py APEX_FUTURES.py run_top100.py
+
+      - name: Top 100 engine tests
+        run: python -m apex_top100.tests.test_engine
+
+      - name: APEX integration tests
+        run: python -m apex_top100.tests.test_apex_hook
+
+      - name: Fail if credentials are hardcoded
+        run: |
+          if grep -rInE '(API_KEY|SECRET_KEY|api_key|api_secret)[^=:]*[:=][[:space:]]*["'"'"'][A-Za-z0-9]{20,}["'"'"']' --include='*.py' .; then
+            echo "::error::وُجد مفتاح مكتوب نصاً داخل الكود"
+            exit 1
+          fi
+          echo "لا مفاتيح داخل الكود"

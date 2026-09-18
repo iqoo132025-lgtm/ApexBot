@@ -47,6 +47,7 @@ class Top100Signal:
     metrics: Dict[str, Optional[float]] = field(default_factory=dict)
     flags: List[str] = field(default_factory=list)
     tradable: bool = True
+    data_quality: str = "ohlc"     # ohlc = شموع حقيقية | price_only = إغلاق فقط بلا High/Low
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -276,10 +277,21 @@ def analyze_coin(coin, ohlcv, btc_closes: List[float], eth_closes: List[float],
 
     corr = I.correlation(I.returns(closes[-90:]), I.returns(btc_closes[-90:])) if btc_closes else None
     atrp = dd_m["atr_pct"]
+    if getattr(ohlcv, "price_only", False):
+        atrp = None
+        dd_m["atr_pct"] = None
+        for k in ("nearest_support", "nearest_resistance", "supports", "resistances"):
+            str_m[k] = None if not isinstance(str_m.get(k), list) else []
     risk = _risk_level(atrp, dd_m["from_365d_high_pct"], corr, coin.rank)
 
     # ── بوابة بنيوية: لا إشارة بمجرد حالة السوق ──
     tradable = True
+    price_only = bool(getattr(ohlcv, "price_only", False))
+    if price_only:
+        # High/Low غير حقيقية: ATR والدعم/المقاومة ومنطقة الدخول والإبطال والأهداف
+        # ستكون مضلّلة، فنمنع الإشارة ونكتفي بالتتبع والسكور.
+        tradable = False
+        flags.append("بيانات إغلاق فقط بلا High/Low حقيقية — لا إشارة تعتمد على ATR")
     if t_s < 45:
         tradable = False; flags.append("الاتجاه الأسبوعي غير داعم")
     if vol_state == "Decreasing" and (vol_m.get("vol_7_30") or 1) < 0.7:
@@ -293,9 +305,15 @@ def analyze_coin(coin, ohlcv, btc_closes: List[float], eth_closes: List[float],
         flags.append("تحت SMA30 الأسبوعي")
 
     # ── منطقة الدخول ──
-    atr_abs = (atrp or 3.0) / 100.0 * price
+    # في وضع price_only نستخدم تذبذب الإغلاقات كبديل تقريبي، والإشارة ممنوعة أصلاً.
+    if atrp is None:
+        rets = I.returns(closes[-30:])
+        atr_proxy_pct = (I.stdev(rets) * 100.0) if rets else 3.0
+        atr_abs = max(atr_proxy_pct, 1.0) / 100.0 * price
+    else:
+        atr_abs = atrp / 100.0 * price
     sma20 = I.sma(closes, 20) or price
-    nearest_sup = str_m["nearest_support"] or (price * 0.9)
+    nearest_sup = str_m.get("nearest_support") or (min(closes[-60:]) if len(closes) >= 30 else price * 0.9)
     entry_high = min(price, max(sma20, nearest_sup * 1.02) + 0.25 * atr_abs)
     entry_low = max(nearest_sup, entry_high - 1.2 * atr_abs)
     if entry_low >= entry_high:
@@ -343,4 +361,5 @@ def analyze_coin(coin, ohlcv, btc_closes: List[float], eth_closes: List[float],
         invalidation=invalidation, tp1=targets[0], tp2=targets[1], tp3=targets[2],
         position_pct=size, components={k: round(v, 1) for k, v in comps.items()},
         metrics=metrics, flags=flags, tradable=tradable,
+        data_quality="price_only" if price_only else "ohlc",
     )

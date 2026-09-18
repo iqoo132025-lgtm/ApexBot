@@ -8,6 +8,7 @@ import math
 import random
 from typing import Dict, List, Optional
 
+from .config import STABLE_SYMBOLS, WRAPPED_SYMBOLS
 from .data_sources import CoinInfo, OHLCV
 
 
@@ -22,17 +23,21 @@ class MockDataProvider:
 
     def _build(self) -> None:
         rnd = random.Random(self.seed)
-        self.symbols = ["BTC", "ETH", "SOL", "SUI", "BNB", "XRP", "ADA", "AVAX", "LINK", "DOT"]
+        self.symbols = ["BTC", "ETH", "USDT", "SOL", "SUI", "BNB", "XRP", "ADA", "AVAX", "LINK", "DOT"]
+        self.price_only_symbols = {"DOT"}     # عملة بلا High/Low حقيقية لاختبار المنع
         while len(self.symbols) < self.n:
             self.symbols.append(f"T{len(self.symbols):02d}")
         kinds = ["up", "up_strong", "flat", "down", "choppy"]
         for i, s in enumerate(self.symbols):
-            self.profiles[s] = "up" if s == "BTC" else ("up_strong" if s in ("SUI", "SOL") else kinds[i % len(kinds)])
+            if s == "USDT":
+                self.profiles[s] = "flat"
+            else:
+                self.profiles[s] = "up" if s == "BTC" else ("up_strong" if s in ("SUI", "SOL") else kinds[i % len(kinds)])
         self._series: Dict[str, List[float]] = {s: self._make_series(s, rnd) for s in self.symbols}
 
     def _make_series(self, sym: str, rnd: random.Random) -> List[float]:
         kind = self.profiles[sym]
-        base = {"BTC": 30000.0, "ETH": 2000.0}.get(sym, 5.0 + rnd.random() * 20)
+        base = {"BTC": 30000.0, "ETH": 2000.0, "USDT": 1.0}.get(sym, 5.0 + rnd.random() * 20)
         drift = {"up": 0.0022, "up_strong": 0.0045, "flat": 0.0002, "down": -0.0030, "choppy": 0.0005}[kind]
         noise = {"up": 0.012, "up_strong": 0.02, "flat": 0.008, "down": 0.015, "choppy": 0.03}[kind]
         r = random.Random(hash(sym) % 10000 + self.seed)
@@ -56,6 +61,7 @@ class MockDataProvider:
             if s == self.symbols[-1] and self.day_offset < 5:
                 continue
             rows.append(CoinInfo(coin_id=s.lower(), symbol=s, name=s, rank=0, price=price,
+                                 is_stablecoin=s in STABLE_SYMBOLS, is_wrapped=s in WRAPPED_SYMBOLS,
                                  market_cap=mcap, volume_24h=vol,
                                  pct_30d=(price / series[-31] - 1) * 100 if len(series) > 31 else 0.0,
                                  ath=max(series), ath_change_pct=(price / max(series) - 1) * 100))
@@ -77,6 +83,9 @@ class MockDataProvider:
         for i, c in enumerate(closes):
             growth = 1.0 + (0.9 * i / max(1, len(closes)) if self.profiles[coin.symbol] in ("up", "up_strong") else 0.0)
             vols.append(c * 1_000_000 * growth * (0.8 + r.random() * 0.4))
+        if coin.symbol in self.price_only_symbols:
+            return OHLCV(symbol=coin.symbol, opens=closes[:], highs=closes[:], lows=closes[:],
+                         closes=closes, volumes=vols, source="mock_price_only", price_only=True)
         return OHLCV(symbol=coin.symbol, opens=closes[:], highs=highs, lows=lows,
                      closes=closes, volumes=vols, source="mock")
 

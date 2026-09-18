@@ -160,5 +160,68 @@ class TestSignalAndEngine(unittest.TestCase):
             self.assertTrue(with_rank, "التحليل يجب أن يستخدم تغيّر الترتيب من اللقطات")
 
 
+class TestUniverseIntegrity(unittest.TestCase):
+    """ترتيب CoinGecko الحقيقي محفوظ، والاستبعاد يقع على الإشارات لا على الكون."""
+
+    def _provider_with_rows(self, rows):
+        from apex_top100.data_sources import LiveDataProvider
+        cfg = Top100Config(universe_size=5, cache_dir=tempfile.mkdtemp())
+        p = LiveDataProvider(cfg)
+        p.http.get_json = lambda *a, **k: rows
+        return p, cfg
+
+    def test_real_rank_is_preserved(self):
+        rows = [
+            {"id": "bitcoin",  "symbol": "btc",  "name": "Bitcoin",  "market_cap_rank": 1, "market_cap": 1e12, "current_price": 60000, "total_volume": 3e10},
+            {"id": "ethereum", "symbol": "eth",  "name": "Ethereum", "market_cap_rank": 2, "market_cap": 4e11, "current_price": 3000,  "total_volume": 1e10},
+            {"id": "tether",   "symbol": "usdt", "name": "Tether",   "market_cap_rank": 3, "market_cap": 1e11, "current_price": 1.0,   "total_volume": 5e10},
+            {"id": "solana",   "symbol": "sol",  "name": "Solana",   "market_cap_rank": 4, "market_cap": 9e10, "current_price": 150,   "total_volume": 4e9},
+            {"id": "wbtc",     "symbol": "wbtc", "name": "Wrapped Bitcoin", "market_cap_rank": 5, "market_cap": 8e10, "current_price": 60000, "total_volume": 3e8},
+            {"id": "faraway",  "symbol": "far",  "name": "Faraway",  "market_cap_rank": 105, "market_cap": 1e8, "current_price": 2, "total_volume": 1e6},
+        ]
+        provider, cfg = self._provider_with_rows(rows)
+        coins = provider.fetch_top_markets(5)
+        by_symbol = {c.symbol: c for c in coins}
+
+        # الترتيب كما تعطيه CoinGecko، بلا إعادة ترقيم
+        self.assertEqual([c.rank for c in coins], [1, 2, 3, 4, 5])
+        self.assertEqual(by_symbol["SOL"].rank, 4, "SOL يجب أن يبقى #4 لا أن يصعد بعد حذف USDT")
+        # العملات خارج أول n لا تدخل الكون
+        self.assertNotIn("FAR", by_symbol)
+        # Stablecoins والمغلَّفة داخل الكون (فيدخلان rank_history) لكن خارج الإشارات
+        self.assertIn("USDT", by_symbol)
+        self.assertTrue(by_symbol["USDT"].is_stablecoin)
+        self.assertTrue(by_symbol["WBTC"].is_wrapped)
+        self.assertFalse(by_symbol["USDT"].signalable(cfg))
+        self.assertFalse(by_symbol["WBTC"].signalable(cfg))
+        self.assertTrue(by_symbol["SOL"].signalable(cfg))
+
+    def test_snapshot_keeps_stablecoins_but_signals_do_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eng, hooks = build_engine(tmp)
+            eng.run_once()
+            snap = eng.store.snapshot(eng.store.last_snapshot_date())
+            self.assertIn("usdt", snap, "Stablecoin يجب أن تبقى في تاريخ الترتيب")
+            self.assertNotIn("USDT", [s.symbol for s in eng.analyze_all()],
+                             "Stablecoin لا تدخل التحليل ولا الإشارات")
+
+
+class TestDataQuality(unittest.TestCase):
+    """بيانات بلا High/Low حقيقية لا تُنتج إشارة."""
+
+    def test_price_only_coin_is_not_tradable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eng, hooks = build_engine(tmp)
+            eng.cfg.min_score = 1
+            out = eng.run_once()
+            price_only = [s for s in out["signals"] if s.data_quality == "price_only"]
+            self.assertTrue(price_only, "المزوّد الصناعي يوفّر عملة price_only للاختبار")
+            for s in price_only:
+                self.assertFalse(s.tradable, f"{s.symbol}: إشارة مبنية على High/Low غير حقيقية")
+                self.assertIsNone(s.metrics.get("atr_pct"))
+            self.assertTrue(all(s.data_quality == "ohlc" for s in out["sent"]),
+                            "لا تُرسل إشارة إلا على شموع حقيقية")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

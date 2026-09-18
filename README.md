@@ -54,8 +54,10 @@ setx TELEGRAM_CHAT_ID "..."     # اختياري
 
 ## الاختبارات
 
+يشغّلها GitHub Actions على كل push و PR (بايثون 3.10 و3.11 و3.12)، ومعها فحص يفشل إن عاد أي مفتاح مكتوباً نصاً داخل الكود.
+
 ```powershell
-python -m apex_top100.tests.test_engine      # المحرك: 8 اختبارات
+python -m apex_top100.tests.test_engine      # المحرك: 11 اختباراً
 python -m apex_top100.tests.test_apex_hook   # الدمج داخل البوت: 4 اختبارات
 ```
 

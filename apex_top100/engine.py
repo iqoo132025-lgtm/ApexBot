@@ -107,12 +107,19 @@ class Top100MarketEngine:
     # ══════════════════════════════════════
     #  3) بيانات الشموع
     # ══════════════════════════════════════
+    def signalable_universe(self) -> List[CoinInfo]:
+        """
+        الكون كله يدخل التاريخ واللقطات بترتيبه الحقيقي.
+        الإشارات وحساب اتساع السوق يستبعدان Stablecoins والعملات المغلَّفة.
+        """
+        return [c for c in self.universe if c.signalable(self.cfg)]
+
     def _priority_order(self) -> List[CoinInfo]:
         """أولوية السحب: الداخل الجديد، ثم صاعدو الترتيب، ثم الأعلى ترتيباً."""
         movers = {m["coin_id"] for m in self.store.top_rank_movers(days=30, limit=15)}
         def key(c: CoinInfo):
             return (0 if c.coin_id in self.new_entries else 1 if c.coin_id in movers else 2, c.rank)
-        return sorted(self.universe, key=key)
+        return sorted(self.signalable_universe(), key=key)
 
     def load_ohlcv(self, coins: List[CoinInfo]) -> Dict[str, OHLCV]:
         out: Dict[str, OHLCV] = {}
@@ -143,7 +150,9 @@ class Top100MarketEngine:
             return self.regime
         eth_ohlcv = self.ohlcv_cache.get(eth.coin_id) if eth else None
 
-        coin_closes = {cid: o.closes for cid, o in self.ohlcv_cache.items()}
+        eligible = {c.coin_id for c in self.signalable_universe()}
+        coin_closes = {cid: o.closes for cid, o in self.ohlcv_cache.items()
+                       if cid in eligible and not getattr(o, "price_only", False)}
         mcap_change = self._total_mcap_change_30d()
         previous = self.store.last_regime()
         result = detect_regime(btc_ohlcv.closes, coin_closes,
@@ -186,7 +195,7 @@ class Top100MarketEngine:
         btc_closes = self.ohlcv_cache[btc.coin_id].closes if btc and btc.coin_id in self.ohlcv_cache else []
         eth_closes = self.ohlcv_cache[eth.coin_id].closes if eth and eth.coin_id in self.ohlcv_cache else []
         sigs: List[Top100Signal] = []
-        for c in self.universe:
+        for c in self.signalable_universe():
             o = self.ohlcv_cache.get(c.coin_id)
             if not o:
                 continue

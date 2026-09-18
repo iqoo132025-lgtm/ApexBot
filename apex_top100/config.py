@@ -13,10 +13,13 @@ from typing import Dict, List, Optional
 @dataclass
 class Top100Config:
     # ── الكون المتتبَّع ──
-    universe_size: int = 100          # أكبر N عملة حسب Market Cap
-    exclude_stablecoins: bool = True
-    exclude_wrapped: bool = True      # WBTC/WETH/stETH... نسخ مكرّرة من الأصل
-    extra_excluded: List[str] = field(default_factory=lambda: ["USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "PYUSD"])
+    # الكون = أكبر N عملة بترتيب CoinGecko الحقيقي (market_cap_rank) كما هو، بلا إعادة ترقيم.
+    # Stablecoins والعملات المغلَّفة تبقى داخل الكون وداخل rank_history حفاظاً على صحة
+    # الترتيب وأحداث الدخول/الخروج — وتُستبعد من *الإشارات* ومن حساب اتساع السوق فقط.
+    universe_size: int = 100
+    signal_exclude_stablecoins: bool = True
+    signal_exclude_wrapped: bool = True    # WBTC/WETH/stETH... نسخ مكرّرة من الأصل
+    extra_signal_excluded: List[str] = field(default_factory=list)
 
     # ── الدورات الزمنية (ثواني) ──
     universe_refresh_sec: int = 3600      # سحب قائمة Top 100 كل ساعة
