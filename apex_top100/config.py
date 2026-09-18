@@ -49,6 +49,13 @@ class Top100Config:
         "drawdown":     8.0,    # الـ Drawdown ومخاطر التذبذب
     })
 
+    # ── Paper Trading / Forward Testing ──
+    paper_trading: bool = True            # كل إشارة تُفتح كمركز ورقي ويُقاس أداؤها
+    paper_start_equity: float = 1000.0
+    paper_entry_expiry_days: int = 3
+    paper_max_hold_days: int = 45
+    paper_slippage_pct: float = 0.05
+
     # ── تخزين ──
     db_path: str = "apex_top100.db"
     cache_dir: str = ".apex_cache"

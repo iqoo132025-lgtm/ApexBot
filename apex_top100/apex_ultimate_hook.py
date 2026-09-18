@@ -115,7 +115,7 @@ def install_top100(apex_config: dict, state: dict, log, start: bool = True,
     يقرأ إعداداته من CONFIG الخاص بـ APEX_ULTIMATE إن وُجدت، وإلا من القيم الافتراضية.
     توكن Telegram من متغيرات البيئة: TELEGRAM_TOKEN و TELEGRAM_CHAT_ID.
     """
-    state.setdefault("top100", {"regime": None, "signals": [], "events": []})
+    state.setdefault("top100", {"regime": None, "signals": [], "events": [], "paper": {}})
 
     base_dir = os.path.dirname(os.path.abspath(__file__))
     cfg = Top100Config(
@@ -140,8 +140,23 @@ def install_top100(apex_config: dict, state: dict, log, start: bool = True,
         telegram=TelegramSender(cfg.telegram_token, cfg.telegram_chat_id),
     )
 
+    # أداء المسار الورقي يظهر في اللوحة وعلى /api/top100
+    def _refresh_paper():
+        while True:
+            try:
+                if engine.paper:
+                    state["top100"]["paper"] = {
+                        "stats": engine.paper.stats(),
+                        "open": engine.paper.open_positions()[:10],
+                        "closed": engine.paper.closed_positions(limit=10),
+                    }
+            except Exception:
+                pass
+            time.sleep(60)
+
     if start:
         threading.Thread(target=engine.run_forever, name="top100-engine", daemon=True).start()
+        threading.Thread(target=_refresh_paper, name="top100-paper", daemon=True).start()
         try:
             log("🌐 Top 100 Market Engine يعمل بجانب مسار التداول", "success")
         except Exception:

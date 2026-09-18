@@ -33,8 +33,9 @@ python APEX_ULTIMATE.py                                         # البوت + T
 لتشغيل محرك Top 100 وحده:
 
 ```powershell
-python run_top100.py --demo    # محاكاة بلا إنترنت
-python run_top100.py --once    # دورة حقيقية
+python run_top100.py --demo           # محاكاة بلا إنترنت
+python run_top100.py --once           # دورة حقيقية
+python run_top100.py --paper-report   # تقرير Forward Test
 ```
 
 ## المفاتيح
@@ -58,6 +59,7 @@ setx TELEGRAM_CHAT_ID "..."     # اختياري
 
 ```powershell
 python -m apex_top100.tests.test_engine      # المحرك: 11 اختباراً
+python -m apex_top100.tests.test_paper       # Paper Trading: 12 اختباراً
 python -m apex_top100.tests.test_apex_hook   # الدمج داخل البوت: 4 اختبارات
 ```
 

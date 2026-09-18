@@ -31,6 +31,7 @@ def main() -> int:
     ap.add_argument("--telegram-token", default=os.getenv("TELEGRAM_TOKEN"))
     ap.add_argument("--telegram-chat", default=os.getenv("TELEGRAM_CHAT_ID"))
     ap.add_argument("--days", type=int, default=20, help="عدد أيام المحاكاة في وضع --demo")
+    ap.add_argument("--paper-report", action="store_true", help="تقرير Paper Trading / Forward Test")
     args = ap.parse_args()
 
     cfg = Top100Config(universe_size=args.size, min_score=args.min_score, db_path=args.db,
@@ -45,6 +46,16 @@ def main() -> int:
         provider = MockDataProvider(n=cfg.universe_size)
 
     engine = build_engine(cfg, bridge=ApexV2Bridge(), provider=provider)
+
+    if args.paper_report:
+        if not engine.paper:
+            print("Paper Trading معطّل في الإعدادات")
+            return 1
+        print(engine.paper.report())
+        for p in engine.paper.open_positions()[:10]:
+            print(f"  مفتوح: {p['symbol']} @ {p['entry'] or p['entry_high']:.4f} "
+                  f"({p['status']}, باقٍ {p['remaining']*100:.0f}%)")
+        return 0
 
     if args.demo:
         from datetime import date, timedelta
@@ -66,6 +77,8 @@ def main() -> int:
         print("أنماط من اللقطات:")
         for k, rows in pats.items():
             print(f"  {k}: {len(rows)}")
+        if engine.paper:
+            print("\n" + engine.paper.report())
         return 0
 
     if args.loop:

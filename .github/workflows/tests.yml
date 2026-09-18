@@ -29,6 +29,9 @@ jobs:
       - name: Top 100 engine tests
         run: python -m apex_top100.tests.test_engine
 
+      - name: Paper trading tests
+        run: python -m apex_top100.tests.test_paper
+
       - name: APEX integration tests
         run: python -m apex_top100.tests.test_apex_hook
 

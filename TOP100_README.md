@@ -38,6 +38,7 @@ python3 run_top100.py --demo            # محاكاة كاملة بدون إن�
 python3 run_top100.py --once            # دورة واحدة على البيانات الحية
 python3 run_top100.py --loop --telegram-token XXX --telegram-chat 123
 python3 -m apex_top100.tests.test_engine   # 11 اختباراً
+python3 -m apex_top100.tests.test_paper    # 12 اختباراً
 ```
 
 ## Market Regime Detector
@@ -134,6 +135,33 @@ store.exited_history(days=365)          # تاريخ الخارجة
 و`auto_execute=False` أي أن Top 100 إشارات فقط ولا يفتح صفقة من نفسه.
 
 الاختبار: `python -m apex_top100.tests.test_apex_hook` (4 اختبارات).
+
+## Paper Trading / Forward Testing
+
+قبل السماح بأي تنفيذ بأموال حقيقية، كل إشارة تُفتح كمركز **ورقي** بأسعار السوق الحقيقية
+وتُدار كما ستُدار الصفقة الحقيقية تماماً (`apex_top100/paper.py`):
+
+- دخول عند السوق إذا كان السعر داخل منطقة الدخول، وإلا أمر معلّق ينتهي بعد `paper_entry_expiry_days`
+  أو يُلغى فوراً إن كُسر الإبطال قبل الدخول
+- خروج جزئي: 40% عند TP1 و30% عند TP2 و30% عند TP3، وينتقل الوقف إلى التعادل بعد TP1
+- خروج على الإبطال أو على الوقت الأقصى `paper_max_hold_days`
+- انزلاق مفترض `paper_slippage_pct` على الدخول والخروج
+- تتبّع أقصى ربح وأقصى تراجع داخل الصفقة (MFE / MAE)
+- لا تُفتح مراكز ورقية على بيانات `price_only` إطلاقاً
+
+النتائج في جدولَي `paper_positions` و`paper_equity` داخل نفس قاعدة البيانات، والتقرير:
+
+```powershell
+python run_top100.py --paper-report
+```
+
+يعرض عدد الصفقات، نسبة الربح، المتوسط بوحدات المخاطرة (R)، متوسط الرابحة والخاسرة،
+أفضل وأسوأ صفقة، متوسط المدة، رأس المال الورقي، والأداء **مفصّلاً حسب حالة السوق** —
+وهو ما يكشف إن كان المحرك يربح في BULL ويخسر في BEAR مثلاً. نفس الأرقام متاحة على
+`/api/top100` تحت `paper`.
+
+القاعدة: `auto_execute=False` يبقى كما هو، ولا يُفتح نقاش التنفيذ الحقيقي قبل أن يُظهر
+Forward Test عدداً كافياً من الصفقات المغلقة بنتيجة موجبة.
 
 ## الربط مع APEX Ultimate V2
 

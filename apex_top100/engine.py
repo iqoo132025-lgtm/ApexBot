@@ -17,6 +17,7 @@ import traceback
 from typing import Callable, Dict, List, Optional
 
 from .analysis import Top100Signal, analyze_coin
+from .paper import PaperBroker, PaperConfig
 from .config import Top100Config
 from .data_sources import CoinInfo, LiveDataProvider, OHLCV
 from .regime import RegimeResult, detect_regime
@@ -59,6 +60,15 @@ class Top100MarketEngine:
         self.store = store or SnapshotStore(self.cfg.db_path)
         self.hooks = hooks or ApexHooks()
         self.telegram = telegram or TelegramSender(self.cfg.telegram_token, self.cfg.telegram_chat_id)
+
+        self.paper: Optional[PaperBroker] = None
+        if self.cfg.paper_trading:
+            self.paper = PaperBroker(self.store.conn, PaperConfig(
+                start_equity=self.cfg.paper_start_equity,
+                entry_expiry_days=self.cfg.paper_entry_expiry_days,
+                max_hold_days=self.cfg.paper_max_hold_days,
+                slippage_pct=self.cfg.paper_slippage_pct,
+            ))
 
         self.universe: List[CoinInfo] = []
         self.ohlcv_cache: Dict[str, OHLCV] = {}
@@ -234,6 +244,8 @@ class Top100MarketEngine:
                 continue
             self.store.record_signal({**sig.to_dict(), "regime": sig.regime})
             self.hooks.on_signal(sig)
+            if self.paper:
+                self.paper.open_from_signal(sig)
             if self.telegram.enabled:
                 self.telegram.send_signal(sig)
             sent.append(sig)
@@ -271,10 +283,26 @@ class Top100MarketEngine:
         self.update_regime()
         sigs = self.analyze_all()
         sent = self.emit(sigs)
+        paper_events = self.update_paper()
         patterns = self.scan_patterns()
         self.new_entries = []
         return {"regime": self.regime, "signals": sigs, "sent": sent,
-                "events": events, "patterns": patterns}
+                "events": events, "patterns": patterns,
+                "paper_events": paper_events,
+                "paper_stats": self.paper.stats() if self.paper else None}
+
+    def update_paper(self) -> List[dict]:
+        """يدير المراكز الورقية بأسعار السوق الحالية ويسجّل منحنى رأس المال."""
+        if not self.paper:
+            return []
+        prices = {c.coin_id: c.price for c in self.universe if c.price}
+        events = self.paper.update(prices)
+        self.paper.record_equity()
+        for e in events:
+            self.hooks.log(f"Paper {e['event']} — {e['symbol']}"
+                           + (f" ({e.get('reason')})" if e.get("reason") else ""))
+        self.hooks.on_pattern("paper_events", events) if events else None
+        return events
 
     def run_forever(self, stop: Optional[Callable[[], bool]] = None) -> None:
         while not (stop and stop()):
