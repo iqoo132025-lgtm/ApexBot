@@ -1,0 +1,7 @@
+# APEX_ULTIMATE.py و apex_top100/ يعملان بالمكتبة القياسية فقط — لا شيء مطلوب.
+# التبعيات أدناه يحتاجها pro_futures_bot.py وحده:
+python-binance>=1.0.19
+pandas>=2.0.0
+numpy>=1.24.0
+ta>=0.11.0
+requests>=2.31.0

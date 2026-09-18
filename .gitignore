@@ -1,0 +1,16 @@
+# حالة التشغيل وقواعد البيانات — لا تُرفع
+apex_top100.db
+apex_top100_demo.db
+apex_ultimate_state.json
+.apex_cache/
+*.db-journal
+
+# أسرار
+.env
+*.key
+
+# بايثون
+__pycache__/
+*.pyc
+.venv/
+venv/
