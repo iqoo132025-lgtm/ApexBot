@@ -49,6 +49,11 @@ CONFIG = {
     "LOOP_INTERVAL":       60,    # Scalping: فحص كل دقيقة
     "COOLDOWN":            1800,  # Scalping: 30 دقيقة cooldown بين صفقات نفس العملة
     "WITHDRAW_THRESHOLD_PCT": 15,
+    # ── مسار Top 100 (محرك الاستثمار والسوينغ — إشارات فقط بلا تنفيذ تلقائي) ──
+    "TOP100_ENABLED":      True,
+    "TOP100_UNIVERSE":     100,   # أكبر N عملة حسب Market Cap
+    "TOP100_MIN_SCORE":    70,    # أقل APEX Score لإطلاق إشارة
+    "TOP100_SCAN_MIN":     15,    # دورة مسح كل كم دقيقة
 }
 
 BASE_URL = "https://testnet.binance.vision" if CONFIG["TESTNET"] else "https://api.binance.com"
@@ -69,6 +74,7 @@ state = {
     "logs": [],
     "market": {},
     "protected": False,   # True = توقف بسبب حد الخسارة اليومية
+    "top100": {"regime": None, "signals": [], "events": []},   # مسار Top 100
 }
 sse_clients = []
 sse_lock = threading.Lock()
@@ -1866,6 +1872,7 @@ def snapshot():
         "wins":  state["wins"], "losses": state["losses"],
         "win_rate": round(state["wins"]/t*100,1) if t else 0,
         "blacklisted": list(sl_blacklist.keys()),
+        "top100":      state.get("top100", {}),
         "btc_regime":  _btc_regime_cache["regime"],
         "btc_dom":     _btc_regime_cache.get("dominance","NEUTRAL"),
         "open_positions":[
@@ -2675,6 +2682,9 @@ class Handler(BaseHTTPRequestHandler):
         p=self.path.split('?')[0]
         if p=='/': self._s(200,'text/html; charset=utf-8',HTML.encode())
         elif p=='/snapshot': self._s(200,'application/json',json.dumps(snapshot(),ensure_ascii=False).encode())
+        elif p=='/api/top100':
+            self._s(200,'application/json',
+                    json.dumps(state.get("top100", {}), ensure_ascii=False, default=str).encode())
         elif p=='/chart':
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
@@ -2775,6 +2785,15 @@ if __name__=='__main__':
     # Auto-start bot loop
     state['running'] = True
     threading.Thread(target=bot_loop, daemon=True).start()
+
+    # ── مسار Top 100: يعمل بجانب حلقة التداول ولا يفتح صفقات بنفسه ──
+    if CONFIG.get("TOP100_ENABLED"):
+        try:
+            sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+            from apex_top100.apex_ultimate_hook import install_top100
+            install_top100(CONFIG, state, log)
+        except Exception as _e:
+            log(f"تعذّر تشغيل مسار Top 100: {_e}", "warn")
     try:
         ThreadingHTTPServer(('localhost',PORT),Handler).serve_forever()
     except KeyboardInterrupt:
