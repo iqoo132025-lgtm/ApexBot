@@ -6,6 +6,7 @@
 """
 import math
 import random
+import time
 from typing import Dict, List, Optional
 
 from .config import STABLE_SYMBOLS, WRAPPED_SYMBOLS
@@ -83,11 +84,14 @@ class MockDataProvider:
         for i, c in enumerate(closes):
             growth = 1.0 + (0.9 * i / max(1, len(closes)) if self.profiles[coin.symbol] in ("up", "up_strong") else 0.0)
             vols.append(c * 1_000_000 * growth * (0.8 + r.random() * 0.4))
+        now = int(time.time())
+        times = [now - (len(closes) - 1 - i) * 86400 for i in range(len(closes))]
         if coin.symbol in self.price_only_symbols:
             return OHLCV(symbol=coin.symbol, opens=closes[:], highs=closes[:], lows=closes[:],
-                         closes=closes, volumes=vols, source="mock_price_only", price_only=True)
+                         closes=closes, volumes=vols, times=times,
+                         source="mock_price_only", price_only=True)
         return OHLCV(symbol=coin.symbol, opens=closes[:], highs=highs, lows=lows,
-                     closes=closes, volumes=vols, source="mock")
+                     closes=closes, volumes=vols, times=times, source="mock")
 
     def fetch_global(self) -> Dict[str, float]:
         return {"total_mcap": 2.4e12, "btc_dominance": 54.0, "eth_dominance": 12.0}

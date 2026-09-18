@@ -292,11 +292,19 @@ class Top100MarketEngine:
                 "paper_stats": self.paper.stats() if self.paper else None}
 
     def update_paper(self) -> List[dict]:
-        """يدير المراكز الورقية بأسعار السوق الحالية ويسجّل منحنى رأس المال."""
+        """
+        يدير المراكز الورقية على شموع OHLC الحقيقية لكل فترة منذ آخر تحديث.
+
+        لا تُستخدم لقطة السعر الحالية: بين دورتين قد يهبط السعر فيضرب الوقف
+        ثم يرتد فوق الهدف، واللقطة ترى الارتداد فقط فتحتسب ربحاً لصفقة أُغلقت خاسرة.
+        العملات ذات البيانات price_only (بلا High/Low حقيقية) تُستبعد من الإدارة،
+        وهي أصلاً ممنوعة من فتح مركز ورقي.
+        """
         if not self.paper:
             return []
-        prices = {c.coin_id: c.price for c in self.universe if c.price}
-        events = self.paper.update(prices)
+        candles = {cid: o for cid, o in self.ohlcv_cache.items()
+                   if o and not getattr(o, "price_only", False)}
+        events = self.paper.apply_candles(candles)
         self.paper.record_equity()
         for e in events:
             self.hooks.log(f"Paper {e['event']} — {e['symbol']}"

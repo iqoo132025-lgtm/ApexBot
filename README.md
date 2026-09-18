@@ -59,7 +59,7 @@ setx TELEGRAM_CHAT_ID "..."     # اختياري
 
 ```powershell
 python -m apex_top100.tests.test_engine      # المحرك: 11 اختباراً
-python -m apex_top100.tests.test_paper       # Paper Trading: 12 اختباراً
+python -m apex_top100.tests.test_paper       # Paper Trading: 25 اختباراً
 python -m apex_top100.tests.test_apex_hook   # الدمج داخل البوت: 4 اختبارات
 ```
 

@@ -8,6 +8,17 @@ Paper Trading / Forward Testing لمسار Top 100.
   • خروج جزئي: 40% عند TP1، 30% عند TP2، 30% عند TP3، ونقل الوقف للتعادل بعد TP1
   • تتبّع أقصى ربح وأقصى تراجع داخل الصفقة (MFE / MAE)
 
+**الإدارة تتم على شموع OHLC الحقيقية لكل فترة منذ آخر تحديث، لا على لقطة سعر واحدة**،
+لأن اللقطة تُعمي المحاكاة عمّا حدث بين دورتين: سعر يهبط فيضرب الوقف ثم يرتد فوق الهدف
+كان سيُحتسب ربحاً بينما الصفقة الحقيقية أُغلقت خاسرة.
+
+سياسة ترتيب الأحداث داخل الشمعة الواحدة (مصرَّح بها ومختبَرة):
+  1. الافتتاح أولاً: إن فتحت الشمعة تحت الوقف يُنفَّذ الخروج عند سعر الافتتاح (فجوة هابطة)،
+     وإن فتحت فوق هدف يُنفَّذ الهدف عند سعر الافتتاح.
+  2. عند الغموض — لمست الشمعة الوقف والهدف معاً — **يُفترض الوقف أولاً**. هذا افتراض محافظ
+     يمنع منح الاستراتيجية أفضل نتيجة تلقائياً، لأن هدف الاختبار دليل يُعتمد عليه لا رقم جميل.
+  3. MFE و MAE يُحسبان من High و Low لا من أسعار اللقطات.
+
 الهدف إثبات الأداء ببيانات حقيقية قبل السماح بأي تنفيذ بأموال حقيقية.
 لا يُرسل هذا الملف أي أمر إلى منصة — كل شيء ورقي داخل قاعدة البيانات.
 """
@@ -46,6 +57,7 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     exit_reason   TEXT,
     exit_price    REAL,
     hits          TEXT DEFAULT '[]',        -- الأهداف التي تحققت
+    last_bar_ts   INTEGER DEFAULT 0,        -- زمن آخر شمعة عولجت (يمنع التكرار)
     UNIQUE(coin_id, signaled_at)
 );
 CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_positions(status);
@@ -61,6 +73,46 @@ CREATE TABLE IF NOT EXISTS paper_equity (
 
 # نسب الخروج عند كل هدف
 TP_FRACTIONS = (0.40, 0.30, 0.30)
+
+
+# ══════════════════════════════════════════
+#  شمعة واحدة
+# ══════════════════════════════════════════
+@dataclass
+class Bar:
+    """شمعة OHLC واحدة. ts = زمن فتح الشمعة بالثواني."""
+    ts: int
+    open: float
+    high: float
+    low: float
+    close: float
+
+    @classmethod
+    def coerce(cls, b) -> "Bar":
+        if isinstance(b, Bar):
+            return b
+        if isinstance(b, dict):
+            return cls(int(b.get("ts") or b.get("time") or 0), float(b["open"]),
+                       float(b["high"]), float(b["low"]), float(b["close"]))
+        ts, o, h, l, c = b
+        return cls(int(ts), float(o), float(h), float(l), float(c))
+
+
+def bars_from_ohlcv(ohlcv) -> List[Bar]:
+    """
+    يحوّل كائن OHLCV إلى شموع.
+
+    يرفض بيانات price_only لأنها بلا High/Low حقيقية: إدارة مركز على إغلاق
+    مُكرَّر كـ O=H=L=C اختراعٌ للبيانات، وهذا ما نتجنّبه في الـ Forward Test.
+    """
+    if ohlcv is None or getattr(ohlcv, "price_only", False):
+        return []
+    n = len(ohlcv.closes)
+    if not n or min(len(ohlcv.opens), len(ohlcv.highs), len(ohlcv.lows)) < n:
+        return []
+    times = ohlcv.times if len(ohlcv.times) == n else [0] * n
+    return [Bar(int(times[i]), float(ohlcv.opens[i]), float(ohlcv.highs[i]),
+                float(ohlcv.lows[i]), float(ohlcv.closes[i])) for i in range(n)]
 
 
 def _now() -> int:
@@ -108,14 +160,14 @@ class PaperBroker:
             INSERT OR IGNORE INTO paper_positions
             (coin_id, symbol, status, opened_at, signaled_at, entry_low, entry_high, entry,
              invalidation, stop, tp1, tp2, tp3, size_pct, remaining, score, regime, rank,
-             risk, data_quality)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1.0,?,?,?,?,?)
+             risk, data_quality, last_bar_ts)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1.0,?,?,?,?,?,?)
         """, (d["coin_id"], d["symbol"], "OPEN" if immediate else "PENDING",
               _now() if immediate else None, _now(), entry_low, entry_high, entry,
               float(d["invalidation"]), float(d["invalidation"]),
               float(d["tp1"]), float(d["tp2"]), float(d["tp3"]), float(d["position_pct"]),
               float(d["score"]), d.get("regime"), d.get("rank"), d.get("risk"),
-              d.get("data_quality", "ohlc")))
+              d.get("data_quality", "ohlc"), _now()))
         self.conn.commit()
         return cur.lastrowid or None
 
@@ -130,114 +182,212 @@ class PaperBroker:
         return price * (1 + k) if buy else price * (1 - k)
 
     # ══════════════════════════════════════
-    #  تحديث المراكز بأسعار السوق
+    #  الإدارة على شموع OHLC حقيقية
     # ══════════════════════════════════════
-    def update(self, prices: Dict[str, float]) -> List[dict]:
-        """prices: {coin_id: السعر الحالي}. يعيد الأحداث التي وقعت."""
+    def apply_candles(self, candles: Dict[str, object]) -> List[dict]:
+        """
+        candles: {coin_id: شموع الفترة} — قائمة Bar/dict/tuple أو كائن OHLCV.
+
+        تُعالَج كل شمعة منذ آخر شمعة عولجت (ts >= last_bar_ts) بالترتيب الزمني،
+        فلا تُفقد حركة وقعت بين دورتين. إعادة معالجة الشمعة الجارية آمنة:
+        الأهداف محميّة بقائمة hits، والوقف يُغلق المركز مرة واحدة،
+        و MFE/MAE دوال max/min.
+
+        الشمعة التي وقعت فيها الإشارة لا تُعالَج (last_bar_ts يبدأ من زمن الإشارة)،
+        حتى لا يُحسب هبوط حدث قبل الدخول وقفاً على صفقة لم تكن قائمة بعد.
+        """
         events: List[dict] = []
         rows = self.conn.execute(
             "SELECT * FROM paper_positions WHERE status IN ('PENDING','OPEN')").fetchall()
         for row in rows:
-            price = prices.get(row["coin_id"])
-            if price is None:
+            raw = candles.get(row["coin_id"])
+            if raw is None:
                 continue
-            if row["status"] == "PENDING":
-                events += self._handle_pending(row, price)
-            else:
-                events += self._handle_open(row, price)
+            since = max(int(row["last_bar_ts"] or 0), int(row["signaled_at"] or 0))
+            bars = self._bars_for(raw, since)
+            if not bars:
+                continue
+            events += self._walk(row, bars)
         self.conn.commit()
         return events
 
-    def _handle_pending(self, row, price: float) -> List[dict]:
-        age_days = (_now() - row["signaled_at"]) / 86400.0
-        if price <= row["entry_high"] and price >= row["invalidation"]:
-            entry = self._with_slippage(price, buy=True)
-            self.conn.execute(
-                "UPDATE paper_positions SET status='OPEN', opened_at=?, entry=? WHERE id=?",
-                (_now(), entry, row["id"]))
-            return [{"event": "FILLED", "symbol": row["symbol"], "price": entry}]
-        if price < row["invalidation"]:
-            self.conn.execute(
-                "UPDATE paper_positions SET status='EXPIRED', closed_at=?, exit_reason='invalidated_before_entry' WHERE id=?",
-                (_now(), row["id"]))
-            return [{"event": "EXPIRED", "symbol": row["symbol"], "reason": "كسر الإبطال قبل الدخول"}]
-        if age_days >= self.cfg.entry_expiry_days:
-            self.conn.execute(
-                "UPDATE paper_positions SET status='EXPIRED', closed_at=?, exit_reason='entry_window_expired' WHERE id=?",
-                (_now(), row["id"]))
-            return [{"event": "EXPIRED", "symbol": row["symbol"], "reason": "انتهت نافذة الدخول"}]
-        return []
+    @staticmethod
+    def _bars_for(raw, since_ts: int) -> List["Bar"]:
+        bars = bars_from_ohlcv(raw) if hasattr(raw, "closes") else [Bar.coerce(b) for b in raw]
+        bars = [b for b in bars if b.ts >= since_ts]
+        bars.sort(key=lambda b: b.ts)
+        return bars
 
-    def _handle_open(self, row, price: float) -> List[dict]:
+    def _walk(self, row, bars: List["Bar"]) -> List[dict]:
+        st = dict(row)
+        st["realized_r"] = float(st["realized_r"] or 0.0)
+        st["realized_pct"] = float(st["realized_pct"] or 0.0)
+        st["remaining"] = float(st["remaining"] or 0.0)
+        st["mfe_pct"] = float(st["mfe_pct"] or 0.0)
+        st["mae_pct"] = float(st["mae_pct"] or 0.0)
         events: List[dict] = []
-        entry = row["entry"] or row["entry_high"]
-        risk = max(entry - row["invalidation"], entry * 0.001)
-        move_pct = (price / entry - 1) * 100.0
-        mfe = max(row["mfe_pct"] or 0.0, move_pct)
-        mae = min(row["mae_pct"] or 0.0, move_pct)
-        self.conn.execute("UPDATE paper_positions SET mfe_pct=?, mae_pct=? WHERE id=?",
-                          (mfe, mae, row["id"]))
-
-        hits = json.loads(row["hits"] or "[]")
-        remaining = row["remaining"]
-        realized_r = row["realized_r"] or 0.0
-        realized_pct = row["realized_pct"] or 0.0
-        stop = row["stop"]
-
-        # الأهداف
-        for i, tp_key in enumerate(("tp1", "tp2", "tp3")):
-            tp = row[tp_key]
-            if tp and price >= tp and tp_key not in hits:
-                frac = TP_FRACTIONS[i]
-                exit_price = self._with_slippage(tp, buy=False)
-                realized_r += (exit_price - entry) / risk * frac
-                realized_pct += (exit_price / entry - 1) * 100.0 * frac
-                remaining = max(0.0, remaining - frac)
-                hits.append(tp_key)
-                events.append({"event": tp_key.upper(), "symbol": row["symbol"], "price": exit_price})
-                if tp_key == "tp1" and self.cfg.breakeven_after_tp1:
-                    stop = max(stop, entry)
-
-        if remaining <= 0.001:
-            self._close(row["id"], price, "targets_reached", realized_r, realized_pct, hits, stop)
-            events.append({"event": "CLOSED", "symbol": row["symbol"], "reason": "تحققت الأهداف",
-                           "r": round(realized_r, 2)})
-            return events
-
-        # الوقف / الإبطال
-        if price <= stop:
-            exit_price = self._with_slippage(stop, buy=False)
-            realized_r += (exit_price - entry) / risk * remaining
-            realized_pct += (exit_price / entry - 1) * 100.0 * remaining
-            reason = "stop_breakeven" if stop >= entry else "invalidation"
-            self._close(row["id"], exit_price, reason, realized_r, realized_pct, hits, stop)
-            events.append({"event": "CLOSED", "symbol": row["symbol"],
-                           "reason": "وقف عند التعادل" if stop >= entry else "كسر الإبطال",
-                           "r": round(realized_r, 2)})
-            return events
-
-        # الوقت الأقصى
-        if row["opened_at"] and (_now() - row["opened_at"]) / 86400.0 >= self.cfg.max_hold_days:
-            exit_price = self._with_slippage(price, buy=False)
-            realized_r += (exit_price - entry) / risk * remaining
-            realized_pct += (exit_price / entry - 1) * 100.0 * remaining
-            self._close(row["id"], exit_price, "max_hold", realized_r, realized_pct, hits, stop)
-            events.append({"event": "CLOSED", "symbol": row["symbol"], "reason": "انتهت المدة القصوى",
-                           "r": round(realized_r, 2)})
-            return events
-
-        self.conn.execute(
-            "UPDATE paper_positions SET remaining=?, realized_r=?, realized_pct=?, hits=?, stop=? WHERE id=?",
-            (remaining, realized_r, realized_pct, json.dumps(hits), stop, row["id"]))
+        for bar in bars:
+            just_filled = False
+            if st["status"] == "PENDING":
+                evs = self._bar_pending(st, bar)
+                events += evs
+                just_filled = any(e["event"] == "FILLED" for e in evs)
+            if st["status"] == "OPEN":
+                events += self._bar_open(st, bar, gap_check=not just_filled)
+            st["last_bar_ts"] = max(int(st["last_bar_ts"] or 0), bar.ts)
+            if st["status"] in ("CLOSED", "EXPIRED"):
+                break
+        self._flush(st)
         return events
 
-    def _close(self, pid: int, exit_price: float, reason: str, realized_r: float,
-               realized_pct: float, hits: List[str], stop: float) -> None:
+    # ── أمر معلّق ──────────────────────────
+    def _bar_pending(self, st: dict, bar: "Bar") -> List[dict]:
+        inval = float(st["invalidation"])
+        entry_high = float(st["entry_high"])
+        ts = bar.ts or _now()
+
+        # فجوة تحت الإبطال: السعر لم يتداول داخل منطقة الدخول أصلاً → لا تنفيذ
+        if bar.open < inval:
+            st.update(status="EXPIRED", closed_at=ts, exit_reason="invalidated_before_entry")
+            return [{"event": "EXPIRED", "symbol": st["symbol"],
+                     "reason": "فجوة تحت الإبطال قبل الدخول"}]
+
+        fill = None
+        if bar.open <= entry_high:
+            fill = bar.open              # فتحت داخل المنطقة أو تحتها
+        elif bar.low <= entry_high:
+            fill = entry_high            # نزلت إلى المنطقة خلال الشمعة (أمر محدَّد)
+
+        if fill is not None:
+            st.update(status="OPEN", opened_at=ts, entry=self._with_slippage(fill, buy=True))
+            return [{"event": "FILLED", "symbol": st["symbol"], "price": st["entry"]}]
+
+        if (ts - int(st["signaled_at"])) / 86400.0 >= self.cfg.entry_expiry_days:
+            st.update(status="EXPIRED", closed_at=ts, exit_reason="entry_window_expired")
+            return [{"event": "EXPIRED", "symbol": st["symbol"], "reason": "انتهت نافذة الدخول"}]
+        return []
+
+    # ── مركز مفتوح ─────────────────────────
+    def _bar_open(self, st: dict, bar: "Bar", gap_check: bool = True) -> List[dict]:
+        events: List[dict] = []
+        entry = float(st["entry"] or st["entry_high"])
+        risk = max(entry - float(st["invalidation"]), entry * 0.001)
+        hits: List[str] = list(json.loads(st["hits"] or "[]"))
+        ts = bar.ts or _now()
+        mfe_ref = bar.open
+        stopped = False
+
+        st["mae_pct"] = min(st["mae_pct"], (bar.low / entry - 1) * 100.0)
+
+        def book(index: int, key: str, at_price: float) -> None:
+            frac = TP_FRACTIONS[index]
+            ex = self._with_slippage(at_price, buy=False)
+            st["realized_r"] += (ex - entry) / risk * frac
+            st["realized_pct"] += (ex / entry - 1) * 100.0 * frac
+            st["remaining"] = max(0.0, st["remaining"] - frac)
+            hits.append(key)
+            events.append({"event": key.upper(), "symbol": st["symbol"], "price": ex})
+            if key == "tp1" and self.cfg.breakeven_after_tp1:
+                st["stop"] = max(float(st["stop"]), entry)
+
+        def close(at_price: float, reason: str, label: str) -> None:
+            frac = st["remaining"]
+            ex = self._with_slippage(at_price, buy=False)
+            st["realized_r"] += (ex - entry) / risk * frac
+            st["realized_pct"] += (ex / entry - 1) * 100.0 * frac
+            st.update(status="CLOSED", closed_at=ts, exit_price=ex, exit_reason=reason, remaining=0.0)
+            events.append({"event": "CLOSED", "symbol": st["symbol"], "reason": label,
+                           "r": round(st["realized_r"], 2)})
+
+        def finish(at_price: float, reason: str, label: str) -> None:
+            st.update(status="CLOSED", closed_at=ts, exit_price=at_price, exit_reason=reason,
+                      remaining=0.0)
+            events.append({"event": "CLOSED", "symbol": st["symbol"], "reason": label,
+                           "r": round(st["realized_r"], 2)})
+
+        # (1) الافتتاح أولاً — الفجوة الهابطة تُنفَّذ عند سعر الافتتاح لا عند سعر الوقف النظري
+        if gap_check:
+            if bar.open <= float(st["stop"]):
+                stopped = True
+                at_be = float(st["stop"]) >= entry
+                gapped = bar.open < float(st["stop"])
+                label = "وقف عند التعادل" if at_be else "كسر الإبطال"
+                close(bar.open, "stop_breakeven" if at_be else "invalidation",
+                      ("فجوة هابطة عبر " + label) if gapped else label)
+            else:
+                # فتحت فوق هدف: الهدف تحقق يقيناً قبل أي هبوط لاحق في الشمعة.
+                # يُحتسب عند سعر الهدف لا عند الافتتاح الأعلى — لا نمنح الاستراتيجية الفجوة.
+                for i, key in enumerate(("tp1", "tp2", "tp3")):
+                    tp = st[key]
+                    if tp and key not in hits and bar.open >= float(tp):
+                        book(i, key, float(tp))
+                        mfe_ref = max(mfe_ref, float(tp))
+
+        if st["status"] == "OPEN" and st["remaining"] <= 0.001:
+            finish(self._with_slippage(float(st["tp3"] or bar.open), buy=False),
+                   "targets_reached", "تحققت الأهداف")
+
+        # (2) الحالة الغامضة — الشمعة لمست الوقف والهدف معاً: **يُفترض الوقف أولاً**
+        #     افتراض محافظ يمنع منح الاستراتيجية أفضل نتيجة تلقائياً.
+        if st["status"] == "OPEN" and bar.low <= float(st["stop"]):
+            stopped = True
+            at_breakeven = float(st["stop"]) >= entry
+            close(float(st["stop"]),
+                  "stop_breakeven" if at_breakeven else "invalidation",
+                  "وقف عند التعادل" if at_breakeven else "كسر الإبطال")
+
+        # (3) الأهداف داخل الشمعة (لم يُضرب الوقف)
+        if st["status"] == "OPEN":
+            for i, key in enumerate(("tp1", "tp2", "tp3")):
+                tp = st[key]
+                if tp and key not in hits and bar.high >= float(tp):
+                    book(i, key, float(tp))
+                    mfe_ref = max(mfe_ref, float(tp))
+            if st["remaining"] <= 0.001:
+                finish(self._with_slippage(float(st["tp3"] or bar.close), buy=False),
+                       "targets_reached", "تحققت الأهداف")
+            elif bar.low <= float(st["stop"]):
+                # الوقف انتقل للتعادل بعد الهدف داخل هذه الشمعة، وقاع الشمعة تحته.
+                # لا نعرف الترتيب، فنفترض أن القاع جاء بعد الهدف — وهو الافتراض المحافظ.
+                stopped = True
+                close(float(st["stop"]), "stop_breakeven", "وقف عند التعادل بعد الهدف")
+
+        # (4) المدة القصوى
+        if st["status"] == "OPEN" and st["opened_at"] and \
+                (ts - int(st["opened_at"])) / 86400.0 >= self.cfg.max_hold_days:
+            close(bar.close, "max_hold", "انتهت المدة القصوى")
+
+        # (5) MFE/MAE من High/Low لا من لقطة سعر.
+        #     إن ضُرب الوقف في هذه الشمعة لا يُحتسب High لأنه — بافتراضنا المحافظ — جاء بعد الخروج.
+        if not stopped:
+            mfe_ref = max(mfe_ref, bar.high)
+        st["mfe_pct"] = max(st["mfe_pct"], (mfe_ref / entry - 1) * 100.0)
+        st["hits"] = json.dumps(hits)
+        return events
+
+    def _flush(self, st: dict) -> None:
         self.conn.execute("""
-            UPDATE paper_positions SET status='CLOSED', closed_at=?, exit_price=?, exit_reason=?,
-                   realized_r=?, realized_pct=?, remaining=0.0, hits=?, stop=?
+            UPDATE paper_positions SET status=?, opened_at=?, closed_at=?, entry=?, stop=?,
+                   remaining=?, realized_r=?, realized_pct=?, mfe_pct=?, mae_pct=?,
+                   exit_reason=?, exit_price=?, hits=?, last_bar_ts=?
             WHERE id=?""",
-            (_now(), exit_price, reason, realized_r, realized_pct, json.dumps(hits), stop, pid))
+            (st["status"], st["opened_at"], st["closed_at"], st["entry"], st["stop"],
+             st["remaining"], st["realized_r"], st["realized_pct"], st["mfe_pct"], st["mae_pct"],
+             st["exit_reason"], st["exit_price"],
+             st["hits"] if isinstance(st["hits"], str) else json.dumps(st["hits"] or []),
+             int(st["last_bar_ts"] or 0), st["id"]))
+
+    def update(self, prices: Dict[str, float]) -> List[dict]:
+        """
+        بديل متدهور: لقطة سعر واحدة تُعامَل كشمعة O=H=L=C.
+
+        محفوظ للتوافق فقط. لا يُستعمل في الـ Forward Test لأن اللقطة تُخفي
+        ما حدث بين دورتين — الإدارة الحقيقية عبر apply_candles.
+        """
+        ts = _now()
+        return self.apply_candles(
+            {cid: [Bar(ts, float(p), float(p), float(p), float(p))]
+             for cid, p in prices.items() if p})
 
     # ══════════════════════════════════════
     #  الأداء

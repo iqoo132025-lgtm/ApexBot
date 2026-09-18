@@ -76,6 +76,7 @@ class OHLCV:
     lows: List[float] = field(default_factory=list)
     closes: List[float] = field(default_factory=list)
     volumes: List[float] = field(default_factory=list)
+    times: List[int] = field(default_factory=list)   # زمن فتح كل شمعة (ثوانٍ)
     source: str = "binance"
     price_only: bool = False   # True = لا توجد High/Low حقيقية (سعر إغلاق فقط)
 
@@ -222,6 +223,7 @@ class LiveDataProvider:
                         lows=[float(r[3]) for r in rows],
                         closes=[float(r[4]) for r in rows],
                         volumes=[float(r[7]) for r in rows],   # quote volume = فوليوم بالدولار
+                        times=[int(r[0]) // 1000 for r in rows],
                         source="binance",
                     )
             except Exception:
@@ -247,6 +249,7 @@ class LiveDataProvider:
                 symbol=coin.symbol,
                 opens=prices[:], highs=prices[:], lows=prices[:], closes=prices[:],
                 volumes=vols or [0.0] * len(prices),
+                times=[int(p[0]) // 1000 for p in (data or {}).get("prices", [])],
                 source="coingecko_price_only",
                 price_only=True,
             )
@@ -270,6 +273,7 @@ class LiveDataProvider:
                 lows=[float(r[3]) for r in rows],
                 closes=[float(r[4]) for r in rows],
                 volumes=[0.0] * len(rows),
+                times=[int(r[0]) // 1000 for r in rows],
                 source="coingecko_ohlc",
                 price_only=False,
             )
