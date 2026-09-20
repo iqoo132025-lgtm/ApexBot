@@ -146,7 +146,7 @@ class PaperBroker:
     # ══════════════════════════════════════
     def open_from_signal(self, sig) -> Optional[int]:
         d = sig.to_dict() if hasattr(sig, "to_dict") else dict(sig)
-        if not d.get("tradable", True) or d.get("data_quality") == "price_only":
+        if not d.get("tradable", True) or d.get("data_quality") in ("price_only", "stale"):
             return None
         if self.has_active(d["coin_id"]):
             return None

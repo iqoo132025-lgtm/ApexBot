@@ -63,15 +63,20 @@ for o in eng.ohlcv_cache.values():
         price_only.append(o.symbol)
     else:
         src[o.source] += 1
-print(f"\nمصادر الشموع ({len(eng.ohlcv_cache)} عملة): {dict(src)}")
+print(f"\nشموع محمّلة: {len(eng.ohlcv_cache)} عملة  {dict(src)}")
 if price_only:
     print(f"  price_only ({len(price_only)}): {', '.join(sorted(price_only))}")
     print("  ← بلا High/Low حقيقية: لا إشارة تعتمد على ATR ولا إدارة ورقية")
 
-print(f"\nأخطاء الشبكة أثناء الدورة: "
+report = out.get("data_report")
+if report is not None:
+    print("\n" + report.summary())
+    print(f"\nالدورة {'سليمة' if report.healthy else 'منقوصة — راجع ما سبق قبل الوثوق بالنتائج'}")
+else:
+    print("\nالمزوّد لا يصدر تقرير دورة (مزوّد صناعي؟)")
+
+print(f"\nأخطاء الشبكة كما رآها هذا الفحص: "
       f"{dict(_net_errors) if _net_errors else 'لا شيء'}")
-if _net_errors:
-    print("  ← أي 429 أو 403 هنا يعني أن جزءاً من البيانات جاء من الكاش القديم")
 
 reg = out["regime"]
 if reg:

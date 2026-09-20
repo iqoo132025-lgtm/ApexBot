@@ -67,9 +67,18 @@ class Top100Config:
     send_list_events: bool = True         # إشعار عند دخول/خروج عملة من Top 100
 
     # ── حدود المصدر الخارجي ──
+    # Binance هو المصدر الأساسي للشموع (بلا حد عملي على هذا الاستخدام)، وCoinGecko
+    # بديل فقط: حصته مقنَّنة لأن الطبقة المجانية ترد 429 سريعاً عند 100 عملة.
     max_ohlcv_per_cycle: int = 40         # كم عملة نسحب لها شموع في الدورة الواحدة
     request_timeout: int = 15
     request_retries: int = 3
+    binance_min_interval_sec: float = 0.12   # مباعدة بين طلبات Binance
+    cg_min_interval_sec: float = 2.5         # مباعدة بين طلبات CoinGecko
+    cg_max_calls_per_cycle: int = 25         # ميزانية CoinGecko للدورة الواحدة
+    cg_max_consecutive_429: int = 2          # بعدها يُفتح قاطع الدائرة لبقية الدورة
+    cg_fetch_volumes: bool = False           # طلب فوليوم إضافي من CoinGecko (يضاعف الاستهلاك)
+    ohlcv_cache_ttl_sec: int = 3600          # عمر الشموع في الكاش قبل إعادة الطلب
+    stale_max_age_sec: int = 259200          # أقصى عمر مقبول لنسخة قديمة (3 أيام)
 
     def to_dict(self) -> dict:
         return asdict(self)

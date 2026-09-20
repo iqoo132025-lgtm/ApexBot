@@ -39,6 +39,7 @@ python3 run_top100.py --once            # دورة واحدة على البيا�
 python3 run_top100.py --loop --telegram-token XXX --telegram-chat 123
 python3 -m apex_top100.tests.test_engine   # 11 اختباراً
 python3 -m apex_top100.tests.test_paper    # 25 اختباراً
+python3 -m apex_top100.tests.test_data_sources  # 20 اختباراً
 ```
 
 ## Market Regime Detector
@@ -135,6 +136,54 @@ store.exited_history(days=365)          # تاريخ الخارجة
 و`auto_execute=False` أي أن Top 100 إشارات فقط ولا يفتح صفقة من نفسه.
 
 الاختبار: `python -m apex_top100.tests.test_apex_hook` (4 اختبارات).
+
+## جلب البيانات الحية
+
+سحب الشموع لمئة عملة من CoinGecko وحده يضرب حد الطبقة المجانية ويعود بـ`429`.
+لذلك ترتيب المصادر صارم وحصّة CoinGecko مقنَّنة (`apex_top100/data_sources.py`):
+
+1. **Binance هو المصدر الأساسي للشموع** لكل زوج USDT مدرج — شموع حقيقية بفوليوم،
+   وبلا استهلاك من حصة CoinGecko.
+2. **CoinGecko بديل فقط**: `/coins/{id}/ohlc` للعملات غير المدرجة، بطلب واحد لكل عملة
+   (`cg_fetch_volumes=False` افتراضياً حتى لا يتضاعف الاستهلاك).
+3. **إغلاق يومي فقط** آخر ملاذ، يُوسم `price_only` ولا تُبنى عليه إشارة.
+
+الضوابط في `Top100Config`:
+
+| الإعداد | الافتراضي | ماذا يفعل |
+|---------|-----------|-----------|
+| `cg_min_interval_sec` | 2.5 | مباعدة بين طلبات CoinGecko |
+| `cg_max_calls_per_cycle` | 25 | ميزانية الدورة؛ عند نفادها تُتخطّى بقية العملات بدل إسقاط الدورة |
+| `cg_max_consecutive_429` | 2 | بعدها يُفتح قاطع دائرة على المضيف لبقية الدورة |
+| `binance_min_interval_sec` | 0.12 | مباعدة بين طلبات Binance |
+| `ohlcv_cache_ttl_sec` | 3600 | عمر الشموع في الكاش قبل إعادة الطلب |
+| `stale_max_age_sec` | 259200 | أقصى عمر مقبول لنسخة قديمة (3 أيام) |
+
+### لا سقوط صامت على كاش قديم
+
+كل جلب يعيد مصدره: `fresh` من الشبكة، `cache` نسخة حديثة ضمن TTL، `stale` نسخة قديمة
+بعد فشل الطلب. النسخة القديمة لا تُعاد إلا بطلب صريح، وحين تُستخدم:
+
+- تصل إلى التحليل موسومة `data_quality="stale"` و**لا تُطلق إشارة**،
+- ولا تفتح مركزاً ورقياً ولا تُدار به،
+- ولا تدخل حساب اتساع السوق،
+- وتُذكر باسمها في تقرير الدورة.
+
+إشارة مبنية على سعر الأمس ليست إشارة؛ هذا بالضبط ما كان يمر بصمت من قبل.
+
+### تقرير الدورة
+
+كل دورة تُخرج `CycleReport`: توزيع المصادر، وأصل كل بيانة (fresh/cache/stale)،
+واستهلاك حصة CoinGecko وهل فُتح القاطع، وأخطاء HTTP بحسب الرمز، وأسماء العملات
+`stale` و`price_only` والمتخطَّاة، وهل كان Binance متاحاً أصلاً. يظهر في سجل
+المحرك وفي `run_once()["data_report"]`، ويطبعه `check_live.py` كاملاً.
+
+```powershell
+python check_live.py
+```
+
+`report.healthy` يكون `False` عند أي 429 أو قاطع مفتوح أو بيانات قديمة — أي أن الدورة
+لا يُعتمد على نتائجها.
 
 ## Paper Trading / Forward Testing
 

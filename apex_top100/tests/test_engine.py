@@ -163,10 +163,11 @@ class TestSignalAndEngine(unittest.TestCase):
 class TestUniverseIntegrity(unittest.TestCase):
     """ترتيب CoinGecko الحقيقي محفوظ، والاستبعاد يقع على الإشارات لا على الكون."""
 
-    def _provider_with_rows(self, rows):
-        from apex_top100.data_sources import LiveDataProvider
+    def _provider_with_rows(self, rows, provenance="fresh", age_sec=0.0):
+        from apex_top100.data_sources import FetchResult, LiveDataProvider
         cfg = Top100Config(universe_size=5, cache_dir=tempfile.mkdtemp())
         p = LiveDataProvider(cfg)
+        p.http.fetch = lambda *a, **k: FetchResult(rows, provenance, age_sec)
         p.http.get_json = lambda *a, **k: rows
         return p, cfg
 
