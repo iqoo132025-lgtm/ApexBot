@@ -38,8 +38,50 @@ urllib.request.urlopen = _counting_urlopen
 from apex_top100.config import Top100Config          # noqa: E402
 from apex_top100.integration import ApexV2Bridge, build_engine   # noqa: E402
 
+IDENTIFY = "--identify" in sys.argv
+
 cfg = Top100Config(db_path="apex_top100.db")
 eng = build_engine(cfg, bridge=ApexV2Bridge())
+
+if IDENTIFY:
+    # لا دورة كاملة: طلب واحد للكون، ثم نطبع هوية كل عملة مرشحة للاستبعاد.
+    # الرمز وحده يتصادم، فالقرار يُبنى على coin_id الفريد من CoinGecko.
+    eng.begin_cycle()
+    coins = eng.provider.fetch_top_markets(cfg.universe_size)
+    print("\n" + "=" * 56)
+    print("تعريف العملات — الرمز | الـid | الاسم | السعر | تغيّر 30 يوم")
+    print("=" * 56)
+
+    def _row(c):
+        pct = c.pct_30d
+        pct_s = f"{pct:+.1f}%" if isinstance(pct, (int, float)) else "—"
+        flags = []
+        if c.is_stablecoin:
+            flags.append("stable")
+        if c.is_wrapped:
+            flags.append("wrapped")
+        return (f"  #{c.rank:<4} {c.symbol:<8} {c.coin_id:<34} {c.name[:26]:<28}"
+                f" ${c.price:<14,.6f} {pct_s:>8}  {','.join(flags)}")
+
+    near_dollar = [c for c in coins if 0.97 <= c.price <= 1.03]
+    print(f"\nقرب الدولار ({len(near_dollar)}) — مرشحة لـSTABLE_COIN_IDS:")
+    for c in sorted(near_dollar, key=lambda x: x.rank):
+        print(_row(c))
+
+    watch = {"USDG", "USDY", "USYC", "M"}
+    hits = [c for c in coins if c.symbol.upper() in watch]
+    print(f"\nالرموز قيد السؤال ({len(hits)}):")
+    for c in sorted(hits, key=lambda x: x.rank):
+        print(_row(c))
+    missing = watch - {c.symbol.upper() for c in coins}
+    if missing:
+        print(f"  غير موجودة في الكون الآن: {', '.join(sorted(missing))}")
+
+    print(f"\nالكون كله: {len(coins)} عملة. "
+          f"المستبعدة حالياً من الإشارات: "
+          f"{sum(1 for c in coins if not c.signalable(cfg))}")
+    sys.exit(0)
+
 out = eng.run_once()
 
 print("\n" + "=" * 56)

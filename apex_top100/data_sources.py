@@ -33,7 +33,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from .config import Top100Config, STABLE_SYMBOLS, WRAPPED_SYMBOLS
+from .config import (Top100Config, STABLE_COIN_IDS, STABLE_SYMBOLS,
+                     WRAPPED_SYMBOLS)
 
 CG_BASE = "https://api.coingecko.com/api/v3"
 BINANCE_BASE = "https://api.binance.com"
@@ -134,6 +135,7 @@ class CycleReport:
     stale_symbols: List[str] = field(default_factory=list)
     price_only_symbols: List[str] = field(default_factory=list)
     skipped_symbols: List[str] = field(default_factory=list)   # نفدت الميزانية أو فشل المصدر
+    no_ohlcv_symbols: List[str] = field(default_factory=list)  # لا زوج Binance — لا شموع موثوقة
 
     def as_dict(self) -> dict:
         return {
@@ -147,6 +149,7 @@ class CycleReport:
             "stale": sorted(self.stale_symbols),
             "price_only": sorted(self.price_only_symbols),
             "skipped": sorted(self.skipped_symbols),
+            "no_ohlcv": sorted(self.no_ohlcv_symbols),
         }
 
     def summary(self) -> str:
@@ -168,13 +171,22 @@ class CycleReport:
             lines.append(f"price_only ({len(self.price_only_symbols)}): "
                          f"{', '.join(sorted(self.price_only_symbols))}")
         if self.skipped_symbols:
-            lines.append(f"بلا بيانات هذه الدورة ({len(self.skipped_symbols)}): "
+            lines.append(f"سقط المصدر أو نفدت الميزانية ({len(self.skipped_symbols)}): "
                          f"{', '.join(sorted(self.skipped_symbols))}")
+        if self.no_ohlcv_symbols:
+            lines.append(f"بلا زوج Binance ({len(self.no_ohlcv_symbols)}): "
+                         f"{', '.join(sorted(self.no_ohlcv_symbols))} ← خارج التحليل، "
+                         f"لا يُنقص الدورة")
         return "\n".join(lines)
 
     @property
     def healthy(self) -> bool:
-        """دورة يُعتمد عليها: لا 429، ولا قاطع مفتوح، ولا بيانات قديمة."""
+        """
+        دورة يُعتمد عليها: لا 429، ولا قاطع مفتوح، ولا بيانات قديمة.
+
+        `no_ohlcv` ليس عطلاً: عملة بلا زوج Binance ببساطة خارج التحليل هذه الدورة،
+        وهذا نقص تغطية معلوم لا جودة بيانات مشكوك فيها.
+        """
         return (not self.cg_circuit_open
                 and not self.stale_symbols
                 and self.http_errors.get("429", 0) == 0)
@@ -426,7 +438,7 @@ class LiveDataProvider:
                 pct_30d=row.get("price_change_percentage_30d_in_currency"),
                 ath=row.get("ath"),
                 ath_change_pct=row.get("ath_change_percentage"),
-                is_stablecoin=sym in STABLE_SYMBOLS,
+                is_stablecoin=(row.get("id") in STABLE_COIN_IDS) or sym in STABLE_SYMBOLS,
                 is_wrapped=sym in WRAPPED_SYMBOLS,
             ))
         coins.sort(key=lambda c: c.rank)
@@ -455,7 +467,12 @@ class LiveDataProvider:
         days = days or self.cfg.history_days
         out = self._fetch_ohlcv_inner(coin, days)
         if out is None:
-            self.report.skipped_symbols.append(coin.symbol)
+            # غياب زوج Binance نتيجة متوقعة لا خلل في الدورة، بعكس نفاد الميزانية
+            # أو سقوط المصدر. التقرير يفصلهما حتى لا يختلط النقص بالعطل.
+            if not self.cfg.cg_fetch_ohlc and coin.pair not in self._binance_symbols():
+                self.report.no_ohlcv_symbols.append(coin.symbol)
+            else:
+                self.report.skipped_symbols.append(coin.symbol)
             return None
         self.report.sources[out.source] += 1
         self.report.provenance[out.provenance] += 1
@@ -490,6 +507,11 @@ class LiveDataProvider:
                     )
             except Exception:
                 self.report.http_errors = collections.Counter(self.http.errors)
+
+        # CoinGecko خارج مسار الشموع افتراضياً. عملة بلا زوج Binance لا شموع لها
+        # هذه الدورة، وتُسجَّل no_ohlcv: لا تُحلَّل ولا تُنتج إشارة، ولا تُفشل الدورة.
+        if not self.cfg.cg_fetch_ohlc:
+            return None
 
         # بديل 1: CoinGecko /ohlc — شموع حقيقية (High/Low فعلية) بلا فوليوم
         ohlc = self._coingecko_ohlc(coin, days)
