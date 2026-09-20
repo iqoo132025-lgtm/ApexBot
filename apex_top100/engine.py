@@ -162,7 +162,8 @@ class Top100MarketEngine:
 
         eligible = {c.coin_id for c in self.signalable_universe()}
         coin_closes = {cid: o.closes for cid, o in self.ohlcv_cache.items()
-                       if cid in eligible and not getattr(o, "price_only", False)}
+                       if cid in eligible and not getattr(o, "price_only", False)
+                       and not getattr(o, "stale", False)}
         mcap_change = self._total_mcap_change_30d()
         previous = self.store.last_regime()
         result = detect_regime(btc_ohlcv.closes, coin_closes,
@@ -272,6 +273,7 @@ class Top100MarketEngine:
     #  الدورة الكاملة
     # ══════════════════════════════════════
     def run_once(self) -> Dict[str, object]:
+        self.begin_cycle()
         self.refresh_universe()
         events = self.ensure_daily_snapshot()
         coins = self._priority_order()[:self.cfg.max_ohlcv_per_cycle]
@@ -286,10 +288,31 @@ class Top100MarketEngine:
         paper_events = self.update_paper()
         patterns = self.scan_patterns()
         self.new_entries = []
+        report = self.data_report()
+        if report is not None:
+            self.hooks.log("تقرير بيانات الدورة:\n" + report.summary())
+            if not report.binance_available:
+                self.hooks.log("Binance غير متاح — الشموع تعتمد على CoinGecko وحدها", "warn")
+            if report.cg_circuit_open:
+                self.hooks.log("CoinGecko ردّ 429 — أُوقفت طلباته لبقية الدورة", "warn")
+            if report.stale_symbols:
+                self.hooks.log(f"{len(report.stale_symbols)} عملة ببيانات كاش قديمة — "
+                               f"محجوبة عن الإشارات", "warn")
         return {"regime": self.regime, "signals": sigs, "sent": sent,
                 "events": events, "patterns": patterns,
                 "paper_events": paper_events,
-                "paper_stats": self.paper.stats() if self.paper else None}
+                "paper_stats": self.paper.stats() if self.paper else None,
+                "data_report": report}
+
+    def begin_cycle(self) -> None:
+        """تصفير عدّادات المزوّد وميزانيته قبل كل دورة (المزوّد الصناعي لا يملكها)."""
+        fn = getattr(self.provider, "begin_cycle", None)
+        if callable(fn):
+            fn()
+
+    def data_report(self):
+        """تقرير مصادر بيانات الدورة، أو None لمزوّد لا يصدر تقريراً."""
+        return getattr(self.provider, "report", None)
 
     def update_paper(self) -> List[dict]:
         """
@@ -303,7 +326,8 @@ class Top100MarketEngine:
         if not self.paper:
             return []
         candles = {cid: o for cid, o in self.ohlcv_cache.items()
-                   if o and not getattr(o, "price_only", False)}
+                   if o and not getattr(o, "price_only", False)
+                   and not getattr(o, "stale", False)}
         events = self.paper.apply_candles(candles)
         self.paper.record_equity()
         for e in events:

@@ -47,7 +47,8 @@ class Top100Signal:
     metrics: Dict[str, Optional[float]] = field(default_factory=dict)
     flags: List[str] = field(default_factory=list)
     tradable: bool = True
-    data_quality: str = "ohlc"     # ohlc = شموع حقيقية | price_only = إغلاق فقط بلا High/Low
+    data_quality: str = "ohlc"     # ohlc = شموع حقيقية | price_only = إغلاق فقط بلا
+                                   # High/Low | stale = نسخة كاش قديمة، لا تُتداول
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -292,6 +293,13 @@ def analyze_coin(coin, ohlcv, btc_closes: List[float], eth_closes: List[float],
         # ستكون مضلّلة، فنمنع الإشارة ونكتفي بالتتبع والسكور.
         tradable = False
         flags.append("بيانات إغلاق فقط بلا High/Low حقيقية — لا إشارة تعتمد على ATR")
+    stale = bool(getattr(ohlcv, "stale", False))
+    if stale:
+        # نسخة قديمة من الكاش بعد فشل المصدر: صالحة للسياق لا للتداول.
+        # إشارة على سعر بالأمس ليست إشارة، وهذا هو السقوط الصامت الذي نمنعه.
+        tradable = False
+        age_h = (getattr(ohlcv, "age_sec", 0) or 0) / 3600.0
+        flags.append(f"بيانات من كاش قديم عمره {age_h:.0f} ساعة — لا إشارة")
     if t_s < 45:
         tradable = False; flags.append("الاتجاه الأسبوعي غير داعم")
     if vol_state == "Decreasing" and (vol_m.get("vol_7_30") or 1) < 0.7:
@@ -361,5 +369,5 @@ def analyze_coin(coin, ohlcv, btc_closes: List[float], eth_closes: List[float],
         invalidation=invalidation, tp1=targets[0], tp2=targets[1], tp3=targets[2],
         position_pct=size, components={k: round(v, 1) for k, v in comps.items()},
         metrics=metrics, flags=flags, tradable=tradable,
-        data_quality="price_only" if price_only else "ohlc",
+        data_quality="stale" if stale else ("price_only" if price_only else "ohlc"),
     )

@@ -32,6 +32,9 @@ jobs:
       - name: Paper trading tests
         run: python -m apex_top100.tests.test_paper
 
+      - name: Live data ingestion tests
+        run: python -m apex_top100.tests.test_data_sources
+
       - name: APEX integration tests
         run: python -m apex_top100.tests.test_apex_hook
 
