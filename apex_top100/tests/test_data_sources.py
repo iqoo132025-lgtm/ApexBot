@@ -169,6 +169,101 @@ def klines(n=120):
              0, "1000", 0, 0, 0, 0] for i in range(n)]
 
 
+class TestBinanceOnlyCandles(unittest.TestCase):
+    """
+    CoinGecko خارج مسار الشموع. عملة بلا زوج Binance تُسجَّل no_ohlcv ولا تُحلَّل،
+    وهذا نقص تغطية معلوم لا يُفشل الدورة — بعكس 429 أو بيانات قديمة.
+    """
+
+    def provider(self, **kw):
+        cfg = Top100Config(cache_dir=cache_dir(), request_retries=1, **kw)
+        return LiveDataProvider(cfg)
+
+    def test_no_binance_pair_means_no_candles_and_no_coingecko_call(self):
+        p = self.provider()
+        p._binance_pairs = set()
+        p.begin_cycle()
+        with PatchedNet([]) as net:
+            out = p.fetch_ohlcv(coin("AAA", "aaa"), days=90)
+        self.assertIsNone(out)
+        self.assertEqual(net.calls, [], "لا يُطلب من CoinGecko شيء")
+        self.assertEqual(p.report.cg_calls, 0)
+        self.assertIn("AAA", p.report.no_ohlcv_symbols)
+        self.assertNotIn("AAA", p.report.skipped_symbols,
+                         "غياب الزوج ليس سقوط مصدر")
+
+    def test_a_cycle_of_only_missing_pairs_is_still_healthy(self):
+        p = self.provider()
+        p._binance_pairs = set()
+        p.begin_cycle()
+        with PatchedNet([]):
+            for sym in ("AAA", "BBB", "CCC"):
+                p.fetch_ohlcv(coin(sym, sym.lower()), days=90)
+        self.assertEqual(len(p.report.no_ohlcv_symbols), 3)
+        self.assertTrue(p.report.healthy, "نقص التغطية لا يُفشل الدورة")
+        self.assertIn("بلا زوج Binance", p.report.summary())
+
+    def test_binance_still_serves_what_it_has(self):
+        p = self.provider()
+        p._binance_pairs = {"SOLUSDT"}
+        p.begin_cycle()
+        with PatchedNet([klines()]) as net:
+            out = p.fetch_ohlcv(coin(), days=120)
+        self.assertEqual(out.source, "binance")
+        self.assertEqual(p.report.cg_calls, 0)
+        self.assertEqual(p.report.no_ohlcv_symbols, [])
+        self.assertNotIn("coingecko", net.calls[0])
+
+    def test_the_escape_hatch_still_works(self):
+        """cg_fetch_ohlc=True يعيد السلوك القديم إن احتجناه مع مفتاح demo."""
+        p = self.provider(cg_fetch_ohlc=True)
+        p._binance_pairs = set()
+        p.begin_cycle()
+        rows = [[(1700000000 + i * 86400) * 1000, 100, 105, 95, 102] for i in range(60)]
+        with PatchedNet([rows]):
+            out = p.fetch_ohlcv(coin(), days=90)
+        self.assertEqual(out.source, "coingecko_ohlc")
+
+
+class TestStablecoinIdentity(unittest.TestCase):
+    """
+    الاستبعاد بالـcoin_id الفريد لا بالرمز وحده: رمزان متطابقان لعملتين مختلفتين
+    وارد، فاستبعاد بالرمز يُسقط عملة سليمة من الإشارات.
+    """
+
+    def test_id_excludes_and_symbol_collision_does_not(self):
+        import apex_top100.config as cfgmod
+        import apex_top100.data_sources as ds
+
+        cfg = Top100Config()
+        real = ds.CoinInfo(coin_id="a-real-token", symbol="XYZ", name="Real",
+                           rank=40, price=1.0, market_cap=1e9, volume_24h=1e8)
+        self.assertTrue(real.signalable(cfg), "سعر قرب الدولار وحده لا يستبعد")
+
+        saved = set(cfgmod.STABLE_COIN_IDS)
+        try:
+            cfgmod.STABLE_COIN_IDS.add("a-dollar-token")
+            pegged = ds.CoinInfo(coin_id="a-dollar-token", symbol="XYZ", name="Pegged",
+                                 rank=41, price=1.0, market_cap=1e9, volume_24h=1e8,
+                                 is_stablecoin="a-dollar-token" in cfgmod.STABLE_COIN_IDS)
+            self.assertFalse(pegged.signalable(cfg))
+            self.assertTrue(real.signalable(cfg),
+                            "نفس الرمز بـid مختلف يبقى داخل الإشارات")
+        finally:
+            cfgmod.STABLE_COIN_IDS.clear()
+            cfgmod.STABLE_COIN_IDS.update(saved)
+
+    def test_unknown_symbols_are_not_guessed(self):
+        """M وأمثالها تبقى داخل الإشارات حتى نتحقق من هويتها."""
+        from apex_top100.config import STABLE_COIN_IDS, STABLE_SYMBOLS
+
+        for sym in ("USDG", "USDY", "USYC", "M"):
+            self.assertNotIn(sym, STABLE_SYMBOLS,
+                             f"{sym} لم يُتحقق من id بعد — لا يُستبعد بالرمز")
+        self.assertEqual(STABLE_COIN_IDS, set(),
+                         "يُملأ من الكون الحي عبر check_live.py --identify")
+
+
 class TestCoinGeckoBudgetDefaults(unittest.TestCase):
     """
     القيم التي تحمي الطبقة المجانية. 2.5 ثانية (~24 طلباً/دقيقة) ضربت 429
@@ -178,6 +273,7 @@ class TestCoinGeckoBudgetDefaults(unittest.TestCase):
     def test_spacing_and_budget(self):
         cfg = Top100Config()
         self.assertEqual(cfg.cg_min_interval_sec, 6.0)
+        self.assertFalse(cfg.cg_fetch_ohlc, "الشموع من Binance وحده")
         self.assertLessEqual(60.0 / cfg.cg_min_interval_sec, 10.0,
                              "أكثر من 10 طلبات/دقيقة يعيدنا إلى 429")
         # الميزانية والقاطع لم يُمسّا: التشديد على المباعدة وحدها
@@ -217,7 +313,7 @@ class TestProviderSourceOrder(unittest.TestCase):
         self.assertFalse(p.report.binance_available)
 
     def test_coingecko_budget_stops_further_calls(self):
-        p = self.provider(cg_max_calls_per_cycle=2)
+        p = self.provider(cg_max_calls_per_cycle=2, cg_fetch_ohlc=True)
         p._binance_pairs = set()          # لا زوج على Binance ⇒ كل شيء على CoinGecko
         p.begin_cycle()
         rows = [[(1700000000 + i * 86400) * 1000, 100, 105, 95, 102] for i in range(60)]
@@ -233,7 +329,7 @@ class TestProviderSourceOrder(unittest.TestCase):
         self.assertIn("CCC", p.report.skipped_symbols)
 
     def test_volumes_call_is_off_by_default(self):
-        p = self.provider()
+        p = self.provider(cg_fetch_ohlc=True)
         p._binance_pairs = set()
         p.begin_cycle()
         rows = [[(1700000000 + i * 86400) * 1000, 100, 105, 95, 102] for i in range(60)]

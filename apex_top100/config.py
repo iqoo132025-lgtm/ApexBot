@@ -81,6 +81,10 @@ class Top100Config:
     cg_max_calls_per_cycle: int = 25         # ميزانية CoinGecko للدورة الواحدة
     cg_max_consecutive_429: int = 2          # بعدها يُفتح قاطع الدائرة لبقية الدورة
     cg_fetch_volumes: bool = False           # طلب فوليوم إضافي من CoinGecko (يضاعف الاستهلاك)
+    cg_fetch_ohlc: bool = False              # شموع من CoinGecko — مغلق: Binance وحده مصدر الشموع
+    # الـPublic API موثّق بـ5-15 طلباً/دقيقة «حسب ظروف الاستخدام»، والطلبات الفاشلة
+    # تُحتسب ضمن الحد. تشغيلان حيّان ردّا 429 بعد 13 ثم 7 طلبات رغم مضاعفة المباعدة.
+    # لذلك CoinGecko للكون والميتاداتا فقط، والعملة بلا زوج Binance تُسجَّل no_ohlcv.
     ohlcv_cache_ttl_sec: int = 3600          # عمر الشموع في الكاش قبل إعادة الطلب
     stale_max_age_sec: int = 259200          # أقصى عمر مقبول لنسخة قديمة (3 أيام)
 
@@ -94,6 +98,11 @@ WRAPPED_SYMBOLS = {
     "WBTC", "WETH", "WBETH", "WEETH", "STETH", "WSTETH", "RETH", "CBBTC", "CBETH",
     "SOLVBTC", "BSC-USD", "BTCB", "LBTC", "METH", "EZETH", "RSETH", "SUSDE", "SUSDS",
 }
+# استبعاد بالـcoin_id لا بالرمز: الرموز تتصادم (عملتان بنفس الرمز)، والـid فريد
+# عند CoinGecko. يُملأ هذا من الكون الحي عبر `python check_live.py --identify`،
+# ولا يُخمَّن: رمز غير معروف يبقى داخل الإشارات حتى نتحقق من هويته.
+STABLE_COIN_IDS: set = set()
+
 STABLE_SYMBOLS = {
     "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "PYUSD", "USDD", "FRAX",
     "USDS", "USD1", "BUIDL", "EURC", "USDP", "GUSD", "LUSD", "CRVUSD",
