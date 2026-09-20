@@ -6,11 +6,24 @@
 """
 import math
 import random
+import zlib
 import time
 from typing import Dict, List, Optional
 
 from .config import STABLE_SYMBOLS, WRAPPED_SYMBOLS
 from .data_sources import CoinInfo, OHLCV
+
+
+def _stable_hash(text: str) -> int:
+    """
+    بديل ثابت لـ hash() للنصوص.
+
+    hash() على str عشوائي لكل عملية (PYTHONHASHSEED)، فالمزوّد الذي يأخذ seed
+    لتوليد بيانات ثابتة كان يولّد سلسلة مختلفة في كل تشغيل. هذا أسقط
+    test_policy_never_buys_alone على main في نحو 1 من 400 تشغيل: عملة ملفّها
+    "down" خرجت أحياناً باتجاه أسبوعي داعم فصارت tradable.
+    """
+    return zlib.crc32(text.encode("utf-8"))
 
 
 class MockDataProvider:
@@ -41,7 +54,7 @@ class MockDataProvider:
         base = {"BTC": 30000.0, "ETH": 2000.0, "USDT": 1.0}.get(sym, 5.0 + rnd.random() * 20)
         drift = {"up": 0.0022, "up_strong": 0.0045, "flat": 0.0002, "down": -0.0030, "choppy": 0.0005}[kind]
         noise = {"up": 0.012, "up_strong": 0.02, "flat": 0.008, "down": 0.015, "choppy": 0.03}[kind]
-        r = random.Random(hash(sym) % 10000 + self.seed)
+        r = random.Random(_stable_hash(sym) % 10000 + self.seed)
         out, p = [], base
         for i in range(self.days + self.day_offset):
             p *= (1 + drift + r.gauss(0, noise) + 0.004 * math.sin(i / 23.0))
@@ -80,7 +93,7 @@ class MockDataProvider:
         highs = [c * 1.015 for c in closes]
         lows = [c * 0.985 for c in closes]
         vols = []
-        r = random.Random(hash(coin.symbol) % 997)
+        r = random.Random(_stable_hash(coin.symbol) % 997)
         for i, c in enumerate(closes):
             growth = 1.0 + (0.9 * i / max(1, len(closes)) if self.profiles[coin.symbol] in ("up", "up_strong") else 0.0)
             vols.append(c * 1_000_000 * growth * (0.8 + r.random() * 0.4))

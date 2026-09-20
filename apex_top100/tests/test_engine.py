@@ -240,6 +240,42 @@ class _FakeReport:
         return self._healthy
 
 
+class TestMockProviderDeterminism(unittest.TestCase):
+    """
+    المزوّد الصناعي يأخذ seed ليولّد بيانات ثابتة، فيجب ألا يعتمد على hash()
+    المُعشَّى لكل عملية. كان يفعل، فسقط test_policy_never_buys_alone على main
+    في نحو 1 من 400 تشغيل بسلسلة "down" خرجت باتجاه أسبوعي داعم.
+    """
+
+    def test_symbol_hash_is_stable_across_processes(self):
+        from apex_top100.providers_mock import _stable_hash
+
+        self.assertEqual(_stable_hash("AVAX"), 3859748292)
+        self.assertEqual(_stable_hash("BTC"), 3176990918)
+
+    def test_series_are_reproducible(self):
+        from apex_top100.providers_mock import MockDataProvider
+
+        a, b = MockDataProvider(n=10), MockDataProvider(n=10)
+        self.assertEqual(a._series, b._series)
+        self.assertAlmostEqual(a._series["AVAX"][-1], 1.852859, places=6,
+                               msg="تغيّرت بيانات المزوّد الصناعي — الاختبارات المبنية عليها لم تعد ثابتة")
+
+    def test_the_weak_coin_stays_untradable(self):
+        """الحالة التي سقطت على main: العملة ذات الملف down لا تصبح tradable."""
+        from apex_top100.providers_mock import MockDataProvider
+
+        up = [100 * (1.003 ** i) for i in range(400)]
+        coins = {f"c{i}": [50 * (1.003 ** j) for j in range(300)] for i in range(15)}
+        reg = detect_regime(up, coins)
+        provider = MockDataProvider(n=10)
+        weak = next(c for c in provider.fetch_top_markets()
+                    if provider.profiles[c.symbol] == "down")
+        sig = analyze_coin(weak, provider.fetch_ohlcv(weak), up, up, Top100Config(), reg)
+        self.assertFalse(sig.tradable)
+        self.assertIn("الاتجاه الأسبوعي غير داعم", sig.flags)
+
+
 class TestLoggingSignature(unittest.TestCase):
     """
     regression لـ TypeError: ApexV2Bridge.log() takes 2 positional arguments.
