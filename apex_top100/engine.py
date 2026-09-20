@@ -47,8 +47,13 @@ class ApexHooks:
     def on_pattern(self, name: str, rows: List[dict]) -> None:
         """أنماط مكتشفة من تاريخ اللقطات (Pattern Database)."""
 
-    def log(self, msg: str) -> None:
-        print(f"[TOP100] {msg}", flush=True)
+    def log(self, msg: str, level: str = "info") -> None:
+        """
+        سجل نصي. level من {"info", "warn", "error", "success"} — كل تطبيق للخطاف
+        يجب أن يقبل الوسيط الثاني حتى لا ينكسر مسار تحذير.
+        """
+        prefix = "[TOP100]" if level == "info" else f"[TOP100][{level}]"
+        print(f"{prefix} {msg}", flush=True)
 
 
 class Top100MarketEngine:
@@ -233,8 +238,36 @@ class Top100MarketEngine:
             return False
         return sig.score < (last["score"] or 0) + self.cfg.rescore_improvement
 
+    def cycle_blocked(self) -> Optional[str]:
+        """
+        سبب حجب نتائج الدورة، أو None إذا كانت جودة البيانات مقبولة.
+
+        قاعدة fail-closed: دورة بها 429 أو قاطع مفتوح أو بيانات كاش قديمة لم
+        تستوفِ شروط الاعتماد، فلا تُرسَل منها إشارة ولا يُفتح منها مركز ورقي جديد.
+        التحليل والتصنيف واللقطات والتشخيص تستمر — لكن كنتيجة تشخيصية فقط.
+        """
+        if not self.cfg.require_healthy_cycle:
+            return None
+        report = self.data_report()
+        if report is None or report.healthy:
+            return None
+        reasons = []
+        if report.cg_circuit_open:
+            reasons.append("قاطع CoinGecko مفتوح")
+        if report.http_errors.get("429", 0):
+            reasons.append(f"{report.http_errors['429']}× خطأ 429")
+        if report.stale_symbols:
+            reasons.append(f"{len(report.stale_symbols)} عملة ببيانات قديمة")
+        return "، ".join(reasons) or "جودة البيانات غير مستوفاة"
+
     def emit(self, sigs: List[Top100Signal]) -> List[Top100Signal]:
         threshold = self.min_score_now()
+        blocked = self.cycle_blocked()
+        if blocked is not None:
+            held = sum(1 for s in sigs if s.tradable and s.score >= threshold)
+            self.hooks.log(f"دورة غير سليمة ({blocked}) — حُجبت {held} إشارة مرشحة "
+                           f"ولم يُفتح أي مركز ورقي جديد؛ النتائج تشخيصية فقط", "warn")
+            return []
         sent: List[Top100Signal] = []
         for sig in sigs:
             if not sig.tradable or sig.score < threshold:
@@ -302,7 +335,7 @@ class Top100MarketEngine:
                 "events": events, "patterns": patterns,
                 "paper_events": paper_events,
                 "paper_stats": self.paper.stats() if self.paper else None,
-                "data_report": report}
+                "data_report": report, "blocked": self.cycle_blocked()}
 
     def begin_cycle(self) -> None:
         """تصفير عدّادات المزوّد وميزانيته قبل كل دورة (المزوّد الصناعي لا يملكها)."""

@@ -169,6 +169,29 @@ def klines(n=120):
              0, "1000", 0, 0, 0, 0] for i in range(n)]
 
 
+class TestCoinGeckoBudgetDefaults(unittest.TestCase):
+    """
+    القيم التي تحمي الطبقة المجانية. 2.5 ثانية (~24 طلباً/دقيقة) ضربت 429
+    بعد 14 طلباً في أول تشغيل حي، فالمباعدة الآن 6 ثوانٍ (~10 طلبات/دقيقة).
+    """
+
+    def test_spacing_and_budget(self):
+        cfg = Top100Config()
+        self.assertEqual(cfg.cg_min_interval_sec, 6.0)
+        self.assertLessEqual(60.0 / cfg.cg_min_interval_sec, 10.0,
+                             "أكثر من 10 طلبات/دقيقة يعيدنا إلى 429")
+        # الميزانية والقاطع لم يُمسّا: التشديد على المباعدة وحدها
+        self.assertEqual(cfg.cg_max_calls_per_cycle, 25)
+        self.assertEqual(cfg.cg_max_consecutive_429, 2)
+        self.assertFalse(cfg.cg_fetch_volumes)
+
+    def test_binance_is_not_slowed_by_the_coingecko_spacing(self):
+        """التأخير يقع على عملات fallback وحدها."""
+        cfg = Top100Config()
+        self.assertLess(cfg.binance_min_interval_sec, 1.0)
+        self.assertGreater(cfg.cg_min_interval_sec, cfg.binance_min_interval_sec * 10)
+
+
 class TestProviderSourceOrder(unittest.TestCase):
     def provider(self, **kw):
         cfg = Top100Config(cache_dir=cache_dir(), request_retries=1, **kw)

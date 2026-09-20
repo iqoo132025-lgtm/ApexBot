@@ -16,6 +16,18 @@ from apex_top100.apex_ultimate_hook import install_top100
 from apex_top100.providers_mock import MockDataProvider
 
 
+def _tmp_paths(tmp: str) -> dict:
+    """
+    يوجّه قاعدة البيانات والكاش إلى مجلد مؤقت.
+
+    install_top100 يضعهما بجانب الحزمة افتراضياً — وهو الصحيح للبوت الحقيقي —
+    فبدون هذا يقرأ الاختبار إشارات تشغيل سابق، ويحذفها منعُ التكرار، فيفشل
+    عند التشغيل الثاني على نفس المجلد ويترك apex_top100.db في شجرة العمل.
+    """
+    return {"TOP100_DB_PATH": os.path.join(tmp, "t.db"),
+            "TOP100_CACHE_DIR": os.path.join(tmp, "cache")}
+
+
 class TestApexUltimateIntegration(unittest.TestCase):
     def test_bot_file_wiring(self):
         """الملف نفسه يحتوي نقاط الربط الخمس."""
@@ -29,10 +41,11 @@ class TestApexUltimateIntegration(unittest.TestCase):
     def test_engine_fills_state_and_api_payload(self):
         logs = []
         state = {"open_positions": {}, "protected": False, "logs": []}
-        cfg = {"MAX_OPEN_POSITIONS": 2, "BANNED_SYMBOLS": [], "TOP100_MIN_SCORE": 60,
-               "TOP100_UNIVERSE": 14}
         with tempfile.TemporaryDirectory() as tmp:
-            os.chdir(tmp)
+            # قاعدة البيانات داخل tmp: install_top100 يضعها بجانب الحزمة افتراضياً،
+            # فبدون هذا يقرأ الاختبار إشارات تشغيل سابق ويحذفها منع التكرار.
+            cfg = {"MAX_OPEN_POSITIONS": 2, "BANNED_SYMBOLS": [], "TOP100_MIN_SCORE": 60,
+                   "TOP100_UNIVERSE": 14, **_tmp_paths(tmp)}
             provider = MockDataProvider(n=14)
             engine = install_top100(cfg, state, lambda m, l="info": logs.append(m),
                                     start=False, provider=provider)
@@ -51,9 +64,8 @@ class TestApexUltimateIntegration(unittest.TestCase):
 
     def test_capital_guard_blocks_when_protected(self):
         state = {"open_positions": {}, "protected": True, "logs": []}
-        cfg = {"MAX_OPEN_POSITIONS": 2, "BANNED_SYMBOLS": []}
         with tempfile.TemporaryDirectory() as tmp:
-            os.chdir(tmp)
+            cfg = {"MAX_OPEN_POSITIONS": 2, "BANNED_SYMBOLS": [], **_tmp_paths(tmp)}
             engine = install_top100(cfg, state, lambda m, l="info": None,
                                     start=False, provider=MockDataProvider(n=12))
             engine.cfg.max_ohlcv_per_cycle = 12
@@ -63,9 +75,8 @@ class TestApexUltimateIntegration(unittest.TestCase):
 
     def test_max_positions_guard(self):
         state = {"open_positions": {"BTCUSDT": {}, "ETHUSDT": {}}, "protected": False, "logs": []}
-        cfg = {"MAX_OPEN_POSITIONS": 2, "BANNED_SYMBOLS": []}
         with tempfile.TemporaryDirectory() as tmp:
-            os.chdir(tmp)
+            cfg = {"MAX_OPEN_POSITIONS": 2, "BANNED_SYMBOLS": [], **_tmp_paths(tmp)}
             engine = install_top100(cfg, state, lambda m, l="info": None,
                                     start=False, provider=MockDataProvider(n=12))
             engine.cfg.max_ohlcv_per_cycle = 12

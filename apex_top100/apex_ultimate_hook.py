@@ -101,9 +101,9 @@ class _ApexUltimateBridge(ApexV2Bridge):
                                     "rank": event.rank, "prev_rank": event.prev_rank})
         del bucket["events"][MAX_KEPT_EVENTS:]
 
-    def log(self, msg: str) -> None:
+    def log(self, msg: str, level: str = "info") -> None:
         try:
-            self._log(f"[TOP100] {msg}", "info")
+            self._log(f"[TOP100] {msg}", level)
         except Exception:
             print(f"[TOP100] {msg}", flush=True)
 
@@ -122,8 +122,10 @@ def install_top100(apex_config: dict, state: dict, log, start: bool = True,
         universe_size=int(apex_config.get("TOP100_UNIVERSE", 100)),
         min_score=int(apex_config.get("TOP100_MIN_SCORE", 70)),
         scan_interval_sec=int(apex_config.get("TOP100_SCAN_MIN", 15)) * 60,
-        db_path=os.path.join(os.path.dirname(base_dir), "apex_top100.db"),
-        cache_dir=os.path.join(os.path.dirname(base_dir), ".apex_cache"),
+        db_path=apex_config.get("TOP100_DB_PATH")
+        or os.path.join(os.path.dirname(base_dir), "apex_top100.db"),
+        cache_dir=apex_config.get("TOP100_CACHE_DIR")
+        or os.path.join(os.path.dirname(base_dir), ".apex_cache"),
         telegram_token=os.getenv("TELEGRAM_TOKEN"),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID"),
     )
