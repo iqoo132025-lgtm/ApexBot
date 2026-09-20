@@ -31,6 +31,7 @@ class Top100Config:
     min_score_bear: int = 82              # عتبة أعلى في السوق الهابط
     signal_cooldown_hours: int = 24       # لا نكرر إشارة نفس العملة قبل هذه المدة
     rescore_improvement: int = 8          # إلا إذا تحسّن السكور بهذا القدر
+    require_healthy_cycle: bool = True    # دورة منقوصة الجودة = لا إشارات ولا مراكز ورقية جديدة
 
     # ── إدارة حجم المركز (نسبة من رأس المال) ──
     base_position_pct: float = 3.0

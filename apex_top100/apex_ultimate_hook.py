@@ -101,9 +101,9 @@ class _ApexUltimateBridge(ApexV2Bridge):
                                     "rank": event.rank, "prev_rank": event.prev_rank})
         del bucket["events"][MAX_KEPT_EVENTS:]
 
-    def log(self, msg: str) -> None:
+    def log(self, msg: str, level: str = "info") -> None:
         try:
-            self._log(f"[TOP100] {msg}", "info")
+            self._log(f"[TOP100] {msg}", level)
         except Exception:
             print(f"[TOP100] {msg}", flush=True)
 

@@ -88,9 +88,24 @@ class ApexV2Bridge(ApexHooks):
     def on_pattern(self, name, rows) -> None:
         _call(self.pattern_db, "record", name, rows)
 
-    def log(self, msg: str) -> None:
-        if _call(self.logger, "log", f"[TOP100] {msg}") is None:
-            print(f"[TOP100] {msg}", flush=True)
+    def log(self, msg: str, level: str = "info") -> None:
+        """
+        يمرّر المستوى إلى logger الخارجي إن كان يقبله، وإلا يعيد المحاولة برسالة وحدها.
+        لا يُسمح لهذا المسار بأن يرفع استثناء: التحذير لا يُسقط الدورة.
+        """
+        text = f"[TOP100] {msg}"
+        fn = getattr(self.logger, "log", None)
+        if callable(fn):
+            try:
+                fn(text, level)
+                return
+            except TypeError:
+                pass
+            except Exception as e:
+                print(f"[TOP100][bridge] log فشلت: {e}", flush=True)
+            if _call(self.logger, "log", text) is not None:
+                return
+        print(text if level == "info" else f"[TOP100][{level}] {msg}", flush=True)
 
 
 def build_engine(cfg: Optional[Top100Config] = None, bridge: Optional[ApexV2Bridge] = None,

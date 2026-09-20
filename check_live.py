@@ -75,6 +75,11 @@ if report is not None:
 else:
     print("\nالمزوّد لا يصدر تقرير دورة (مزوّد صناعي؟)")
 
+blocked = out.get("blocked")
+if blocked:
+    print(f"\n⛔ حُجبت نتائج هذه الدورة: {blocked}")
+    print("   لم تُرسل أي إشارة ولم يُفتح أي مركز ورقي جديد — ما يلي تشخيصي فقط.")
+
 print(f"\nأخطاء الشبكة كما رآها هذا الفحص: "
       f"{dict(_net_errors) if _net_errors else 'لا شيء'}")
 

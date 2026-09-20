@@ -23,12 +23,13 @@ from apex_top100.telegram_signals import format_top100_signal, signal_buttons
 class QuietHooks(ApexHooks):
     def __init__(self):
         self.signals, self.events, self.regimes, self.patterns = [], [], [], []
+        self.logs = []
 
     def on_signal(self, sig): self.signals.append(sig)
     def on_list_event(self, e, r): self.events.append(e)
     def on_regime_change(self, r): self.regimes.append(r)
     def on_pattern(self, name, rows): self.patterns.append((name, rows))
-    def log(self, msg): pass
+    def log(self, msg, level="info"): self.logs.append((level, msg))
 
 
 def build_engine(tmpdir, n=14, days=400):
@@ -222,6 +223,166 @@ class TestDataQuality(unittest.TestCase):
                 self.assertIsNone(s.metrics.get("atr_pct"))
             self.assertTrue(all(s.data_quality == "ohlc" for s in out["sent"]),
                             "لا تُرسل إشارة إلا على شموع حقيقية")
+
+
+class _FakeReport:
+    """بديل مبسّط لـ CycleReport لاختبار بوابة جودة الدورة."""
+
+    def __init__(self, healthy=True, cg_circuit_open=False, http_errors=None,
+                 stale_symbols=None):
+        self._healthy = healthy
+        self.cg_circuit_open = cg_circuit_open
+        self.http_errors = http_errors or {}
+        self.stale_symbols = stale_symbols or []
+
+    @property
+    def healthy(self):
+        return self._healthy
+
+
+class TestLoggingSignature(unittest.TestCase):
+    """
+    regression لـ TypeError: ApexV2Bridge.log() takes 2 positional arguments.
+    كل تطبيق لـ ApexHooks.log يجب أن يقبل مستوى التسجيل، لا واحد فقط.
+    """
+
+    def _implementations(self):
+        import importlib
+        import inspect
+        import pkgutil
+
+        import apex_top100
+
+        for mod in pkgutil.iter_modules(apex_top100.__path__):
+            if mod.name.startswith("tests"):
+                continue
+            importlib.import_module(f"apex_top100.{mod.name}")
+        found = [ApexHooks]
+        stack = [ApexHooks]
+        while stack:
+            for sub in stack.pop().__subclasses__():
+                if sub not in found:
+                    found.append(sub)
+                    stack.append(sub)
+        return [(c, c.__dict__["log"]) for c in found if "log" in c.__dict__]
+
+    def test_every_hook_log_accepts_a_level(self):
+        import inspect
+
+        impls = self._implementations()
+        self.assertGreaterEqual(len(impls), 3, "يجب فحص كل تطبيقات log لا واحد")
+        for cls, fn in impls:
+            with self.subTest(cls=cls.__name__):
+                sig = inspect.signature(fn)
+                try:
+                    sig.bind(object(), "msg", "warn")
+                except TypeError as e:
+                    self.fail(f"{cls.__module__}.{cls.__name__}.log لا يقبل مستوى: {e}")
+
+    def test_bridge_log_survives_a_single_argument_logger(self):
+        """logger خارجي قديم يقبل رسالة واحدة — التحذير يُسجَّل ولا يرفع استثناء."""
+        from apex_top100.integration import ApexV2Bridge
+
+        seen = []
+
+        class OldLogger:
+            def log(self, msg):
+                seen.append(msg)
+
+        bridge = ApexV2Bridge(logger=OldLogger())
+        bridge.log("تحذير", "warn")
+        self.assertEqual(len(seen), 1, "يجب السقوط إلى توقيع الوسيط الواحد")
+
+    def test_every_warn_call_site_runs(self):
+        """المسارات الثلاثة التي تستدعي log(..., 'warn') داخل run_once لا تنكسر."""
+        from apex_top100.integration import ApexV2Bridge
+
+        with tempfile.TemporaryDirectory() as tmp:
+            eng, _ = build_engine(tmp)
+            eng.hooks = ApexV2Bridge()          # الجسر الذي انكسر في التشغيل الحي
+            eng.provider.report = _FakeReport(
+                healthy=False, cg_circuit_open=True,
+                http_errors={"429": 2}, stale_symbols=["ada"])
+            eng.provider.report.binance_available = False
+            eng.provider.report.summary = lambda: "تقرير"
+            eng.run_once()                       # كان يرفع TypeError عند engine.py:297
+
+
+class TestFailClosedOnDegradedCycle(unittest.TestCase):
+    """
+    دورة بجودة بيانات منقوصة لا تُنتج إشارات ولا مراكز ورقية جديدة.
+    الإشارات الثمانية في التشغيل الحي خرجت قبل تقييم report.healthy.
+    """
+
+    def _degrade(self, eng):
+        report = _FakeReport(healthy=False, cg_circuit_open=True, http_errors={"429": 2})
+        report.binance_available = True
+        report.summary = lambda: "تقرير"
+        eng.provider.report = report
+        return report
+
+    def test_no_signals_and_no_paper_entries_when_cycle_is_unhealthy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eng, hooks = build_engine(tmp)
+            eng.cfg.min_score = 1               # كل شيء فوق العتبة لولا البوابة
+            self._degrade(eng)
+            out = eng.run_once()
+
+            self.assertEqual(out["sent"], [], "لا إشارة من دورة غير سليمة")
+            self.assertEqual(hooks.signals, [], "on_signal لا يُستدعى")
+            self.assertEqual(eng.paper.open_positions(), [], "لا مركز ورقي جديد")
+            self.assertEqual(eng.store.conn.execute(
+                "SELECT COUNT(*) FROM signals").fetchone()[0], 0,
+                "لا تُسجَّل إشارة من دورة محجوبة")
+            self.assertIsNotNone(out["blocked"], "سبب الحجب يظهر في نتيجة الدورة")
+            self.assertTrue(any(lvl == "warn" and "دورة غير سليمة" in msg
+                                for lvl, msg in hooks.logs),
+                            f"يجب تسجيل سبب الحجب: {hooks.logs}")
+
+    def test_diagnostics_still_run_on_a_blocked_cycle(self):
+        """الحجب يمنع الإشارات فقط — التحليل واللقطة والتصنيف تستمر للتشخيص."""
+        with tempfile.TemporaryDirectory() as tmp:
+            eng, hooks = build_engine(tmp)
+            eng.cfg.min_score = 1
+            self._degrade(eng)
+            out = eng.run_once()
+
+            self.assertTrue(out["signals"], "التحليل يستمر ونتائجه تشخيصية")
+            self.assertIsNotNone(out["regime"], "تصنيف حالة السوق يستمر")
+            self.assertIsNotNone(eng.store.last_snapshot_date(), "اللقطة اليومية تُحفظ")
+
+    def test_healthy_cycle_still_emits(self):
+        """ضبط مقابل: نفس المحرك بدورة سليمة يُرسل إشاراته كالمعتاد."""
+        with tempfile.TemporaryDirectory() as tmp:
+            eng, hooks = build_engine(tmp)
+            eng.cfg.min_score = 1
+            report = _FakeReport(healthy=True)
+            report.binance_available = True
+            report.summary = lambda: "تقرير"
+            eng.provider.report = report
+            out = eng.run_once()
+
+            self.assertTrue(out["sent"], "دورة سليمة يجب أن تُرسل إشارات")
+            self.assertIsNone(out["blocked"])
+            self.assertTrue(eng.paper.open_positions(), "المراكز الورقية تُفتح كالمعتاد")
+
+    def test_provider_without_a_report_is_not_blocked(self):
+        """مزوّد لا يصدر تقريراً (المزوّد الصناعي) لا يُحجب."""
+        with tempfile.TemporaryDirectory() as tmp:
+            eng, _ = build_engine(tmp)
+            eng.cfg.min_score = 1
+            self.assertFalse(hasattr(eng.provider, "report"))
+            self.assertIsNone(eng.cycle_blocked())
+            self.assertTrue(eng.run_once()["sent"])
+
+    def test_flag_can_be_turned_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eng, _ = build_engine(tmp)
+            eng.cfg.min_score = 1
+            eng.cfg.require_healthy_cycle = False
+            self._degrade(eng)
+            self.assertIsNone(eng.cycle_blocked())
+            self.assertTrue(eng.run_once()["sent"], "إيقاف البوابة يعيد السلوك القديم")
 
 
 if __name__ == "__main__":
