@@ -74,7 +74,10 @@ class Top100Config:
     request_timeout: int = 15
     request_retries: int = 3
     binance_min_interval_sec: float = 0.12   # مباعدة بين طلبات Binance
-    cg_min_interval_sec: float = 2.5         # مباعدة بين طلبات CoinGecko
+    cg_min_interval_sec: float = 6.0         # مباعدة بين طلبات CoinGecko
+    # 2.5 ثانية (أي ~24 طلباً/دقيقة) ضربت 429 بعد 14 طلباً في أول تشغيل حي.
+    # 6 ثوانٍ = ~10 طلبات/دقيقة، والتأخير يقع على عملات fallback وحدها
+    # لأن Binance هو المصدر الأساسي ولا يمر بهذه المباعدة.
     cg_max_calls_per_cycle: int = 25         # ميزانية CoinGecko للدورة الواحدة
     cg_max_consecutive_429: int = 2          # بعدها يُفتح قاطع الدائرة لبقية الدورة
     cg_fetch_volumes: bool = False           # طلب فوليوم إضافي من CoinGecko (يضاعف الاستهلاك)
