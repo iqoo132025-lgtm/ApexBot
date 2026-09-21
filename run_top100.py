@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from apex_top100.config import Top100Config
 from apex_top100.integration import ApexV2Bridge, build_engine
+from apex_top100.paper import format_position_line
 from apex_top100.telegram_signals import format_top100_signal
 
 
@@ -53,8 +54,7 @@ def main() -> int:
             return 1
         print(engine.paper.report())
         for p in engine.paper.open_positions()[:10]:
-            print(f"  مفتوح: {p['symbol']} @ {p['entry'] or p['entry_high']:.4f} "
-                  f"({p['status']}, باقٍ {p['remaining']*100:.0f}%)")
+            print("  " + format_position_line(p))
         return 0
 
     if args.demo:
