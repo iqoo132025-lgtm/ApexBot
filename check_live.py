@@ -68,9 +68,10 @@ if IDENTIFY:
     for c in sorted(near_dollar, key=lambda x: x.rank):
         print(_row(c))
 
-    watch = {"USDG", "USDY", "USYC", "M"}
+    # حُسم سابقاً: USDG/USDY/USYC مستبعدة بالـid، وM هو memecore ويبقى.
+    watch = {"RLUSD", "U", "USDGO", "USDF", "BFUSD", "GHO"}
     hits = [c for c in coins if c.symbol.upper() in watch]
-    print(f"\nالرموز قيد السؤال ({len(hits)}):")
+    print(f"\nقيد التحقق — تبقى داخل الإشارات حتى تُعرَّف ({len(hits)}):")
     for c in sorted(hits, key=lambda x: x.rank):
         print(_row(c))
     missing = watch - {c.symbol.upper() for c in coins}

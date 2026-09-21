@@ -99,9 +99,18 @@ WRAPPED_SYMBOLS = {
     "SOLVBTC", "BSC-USD", "BTCB", "LBTC", "METH", "EZETH", "RSETH", "SUSDE", "SUSDS",
 }
 # استبعاد بالـcoin_id لا بالرمز: الرموز تتصادم (عملتان بنفس الرمز)، والـid فريد
-# عند CoinGecko. يُملأ هذا من الكون الحي عبر `python check_live.py --identify`،
-# ولا يُخمَّن: رمز غير معروف يبقى داخل الإشارات حتى نتحقق من هويته.
-STABLE_COIN_IDS: set = set()
+# عند CoinGecko. لا يُخمَّن شيء هنا — كل id أدناه تأكّد من الكون الحي عبر
+# `python check_live.py --identify`، والمجهول يبقى داخل الإشارات حتى يُتحقق منه.
+STABLE_COIN_IDS = {
+    "global-dollar",          # USDG
+    "hashnote-usyc",          # USYC
+    "ondo-us-dollar-yield",   # USDY
+}
+
+# قرب الدولار ليس دليلاً: FIL كان بـ$0.975 وهو Filecoin لا عملة مستقرة، و`M`
+# بـ$1.50 هو MemeCore (`memecore`). أداة --identify تسرد المرشحين فقط، والقرار
+# يبقى على هوية الأصل. هذه ظهرت قرب الدولار ولم يُتحقق منها بعد، فهي **داخل**
+# الإشارات حتى نعرف ما هي: RLUSD, U, USDGO, USDF, BFUSD, GHO.
 
 STABLE_SYMBOLS = {
     "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "PYUSD", "USDD", "FRAX",

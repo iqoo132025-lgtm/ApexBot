@@ -253,15 +253,52 @@ class TestStablecoinIdentity(unittest.TestCase):
             cfgmod.STABLE_COIN_IDS.clear()
             cfgmod.STABLE_COIN_IDS.update(saved)
 
-    def test_unknown_symbols_are_not_guessed(self):
-        """M وأمثالها تبقى داخل الإشارات حتى نتحقق من هويتها."""
-        from apex_top100.config import STABLE_COIN_IDS, STABLE_SYMBOLS
+    def test_only_verified_ids_are_excluded(self):
+        """الثلاثة المتحقَّق منها من الكون الحي، ولا شيء غيرها."""
+        from apex_top100.config import STABLE_COIN_IDS
+
+        self.assertEqual(STABLE_COIN_IDS,
+                         {"global-dollar", "hashnote-usyc", "ondo-us-dollar-yield"})
+
+    def test_memecore_is_not_a_stablecoin(self):
+        """M هو MemeCore بـ$1.50 — الرمز يوحي بغير ذلك، والهوية تحسم."""
+        import apex_top100.data_sources as ds
+        from apex_top100.config import STABLE_COIN_IDS
+
+        self.assertNotIn("memecore", STABLE_COIN_IDS)
+        m = ds.CoinInfo(coin_id="memecore", symbol="M", name="MemeCore", rank=63,
+                        price=1.50, market_cap=1e9, volume_24h=1e8,
+                        is_stablecoin="memecore" in STABLE_COIN_IDS)
+        self.assertTrue(m.signalable(Top100Config()))
+
+    def test_symbols_are_never_the_rule(self):
+        from apex_top100.config import STABLE_SYMBOLS
 
         for sym in ("USDG", "USDY", "USYC", "M"):
             self.assertNotIn(sym, STABLE_SYMBOLS,
-                             f"{sym} لم يُتحقق من id بعد — لا يُستبعد بالرمز")
-        self.assertEqual(STABLE_COIN_IDS, set(),
-                         "يُملأ من الكون الحي عبر check_live.py --identify")
+                             f"{sym} يُستبعد بالـid لا بالرمز")
+
+    def test_a_dollar_price_alone_excludes_nothing(self):
+        """FIL بـ$0.975 هو Filecoin — السعر ليس تصنيفاً."""
+        import apex_top100.data_sources as ds
+        from apex_top100.config import STABLE_COIN_IDS
+
+        fil = ds.CoinInfo(coin_id="filecoin", symbol="FIL", name="Filecoin", rank=44,
+                          price=0.975, market_cap=1e9, volume_24h=1e8,
+                          is_stablecoin="filecoin" in STABLE_COIN_IDS)
+        self.assertTrue(fil.signalable(Top100Config()))
+
+    def test_candidates_awaiting_identification_stay_signalable(self):
+        """ظهرت قرب الدولار ولم يُتحقق منها: تبقى داخل الإشارات لا خارجها."""
+        import apex_top100.data_sources as ds
+        from apex_top100.config import STABLE_COIN_IDS, STABLE_SYMBOLS
+
+        for sym in ("RLUSD", "U", "USDGO", "USDF", "BFUSD", "GHO"):
+            self.assertNotIn(sym, STABLE_SYMBOLS, f"{sym} لم يُتحقق منه بعد")
+            c = ds.CoinInfo(coin_id=f"unverified-{sym.lower()}", symbol=sym, name=sym,
+                            rank=80, price=1.0, market_cap=1e9, volume_24h=1e8,
+                            is_stablecoin=f"unverified-{sym.lower()}" in STABLE_COIN_IDS)
+            self.assertTrue(c.signalable(Top100Config()))
 
 
 class TestCoinGeckoBudgetDefaults(unittest.TestCase):
