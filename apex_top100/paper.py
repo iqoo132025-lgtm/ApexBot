@@ -132,6 +132,22 @@ class PaperConfig:
     slippage_pct: float = 0.05        # انزلاق مفترض على الدخول والخروج
 
 
+def format_position_line(pos: dict) -> str:
+    """
+    سطر عرض واحد لمركز ورقي.
+
+    الأمر المعلّق ليس مركزاً: لا سعر تنفيذ له، و`entry_high` سقف منطقة
+    الدخول لا سعر دخلنا عنده. تسميته «مفتوح» وطباعة ذلك الرقم بجانبه
+    تجعل أمراً لم يُنفَّذ يبدو صفقة قائمة.
+    """
+    if pos["status"] == "PENDING":
+        return (f"معلّق: {pos['symbol']} — منطقة الدخول حتى "
+                f"{float(pos['entry_high']):.4f} (PENDING)")
+    entry = pos["entry"] if pos["entry"] is not None else pos["entry_high"]
+    return (f"مفتوح: {pos['symbol']} @ {float(entry):.4f} "
+            f"({pos['status']}، باقٍ {float(pos['remaining'] or 0) * 100:.0f}%)")
+
+
 class PaperBroker:
     """وسيط ورقي يعمل على نفس قاعدة بيانات المحرك."""
 
@@ -502,20 +518,29 @@ class PaperBroker:
 
     def report(self) -> str:
         s = self.stats()
+        live = self.open_positions()
+        filled = [p for p in live if p["status"] == "OPEN"]
+        pending = [p for p in live if p["status"] == "PENDING"]
         if not s.get("trades"):
             lines = ["Forward Test — لا صفقات مغلقة بعد",
-                     f"مراكز مفتوحة: {s['open']} | رأس المال الورقي: ${s['equity']}"]
-            live = self.open_positions()
+                     f"مراكز منفَّذة: {len(filled)} | أوامر معلّقة: {len(pending)} "
+                     f"| رأس المال الورقي: ${s['equity']}"]
             if live:
-                lines += ["", "حركة المراكز المفتوحة حتى الآن (MFE / MAE):"]
+                lines += ["", "حركة المراكز حتى الآن:"]
                 for pos in live:
-                    lines.append(f"  {pos['symbol']}: MFE {pos['mfe_pct'] or 0.0:+.2f}%"
-                                 f"   MAE {pos['mae_pct'] or 0.0:+.2f}%   ({pos['status']})")
+                    if pos["status"] == "PENDING":
+                        # صفر هنا ليس قياساً: الأمر لم يُنفَّذ فلا سعر دخول يُقاس منه
+                        lines.append(f"  {pos['symbol']}: لم يدخل بعد — أمر معلّق عند "
+                                     f"{float(pos['entry_high']):.4f}")
+                    else:
+                        lines.append(f"  {pos['symbol']}: MFE {pos['mfe_pct'] or 0.0:+.2f}%"
+                                     f"   MAE {pos['mae_pct'] or 0.0:+.2f}%   ({pos['status']})")
             return "\n".join(lines)
         lines = [
             "APEX TOP-100 — FORWARD TEST",
             "",
-            f"الصفقات المغلقة: {s['trades']}   |   المفتوحة: {s['open']}",
+            f"الصفقات المغلقة: {s['trades']}   |   المنفَّذة المفتوحة: {len(filled)}"
+            f"   |   أوامر معلّقة: {len(pending)}",
             f"نسبة الربح: {s['win_rate']}%",
             f"المتوسط لكل صفقة: {s['avg_r']}R   |   الإجمالي: {s['total_r']}R",
             f"متوسط الرابحة: {s['avg_win_r']}R   |   متوسط الخاسرة: {s['avg_loss_r']}R",

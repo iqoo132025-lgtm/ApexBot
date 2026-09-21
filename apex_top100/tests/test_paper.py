@@ -18,7 +18,8 @@ from apex_top100.analysis import Top100Signal
 from apex_top100.config import Top100Config
 from apex_top100.engine import Top100MarketEngine
 from apex_top100.data_sources import OHLCV
-from apex_top100.paper import Bar, PaperBroker, PaperConfig, bars_from_ohlcv
+from apex_top100.paper import (Bar, PaperBroker, PaperConfig, bars_from_ohlcv,
+                               format_position_line)
 from apex_top100.providers_mock import MockDataProvider
 from apex_top100.snapshots import SnapshotStore
 
@@ -404,6 +405,81 @@ class TestDrawdownAndExcursions(unittest.TestCase):
         self.assertIn("لا صفقات مغلقة بعد", text)
         self.assertIn("SOL", text)
         self.assertIn("MFE", text)
+
+
+class TestPositionDisplay(unittest.TestCase):
+    """
+    الأمر المعلّق ليس مركزاً. عرضه كـ«مفتوح» بسعر `entry_high` يجعل أمراً
+    لم يُنفَّذ يبدو صفقة قائمة بسعر دخلناها عنده — وكلاهما غير صحيح.
+    """
+
+    def test_pending_is_not_called_open_and_shows_no_fill_price(self):
+        b = broker()
+        b.open_from_signal(make_signal("ZEC", price=120.0))   # فوق المنطقة
+        pos = b.open_positions()[0]
+        self.assertEqual(pos["status"], "PENDING")
+        self.assertIsNone(pos["entry"], "الأمر المعلّق بلا سعر تنفيذ")
+        line = format_position_line(pos)
+        self.assertIn("معلّق", line)
+        self.assertNotIn("مفتوح", line)
+        self.assertIn("منطقة الدخول حتى", line)
+        self.assertIn("@", format_position_line(dict(pos, status="OPEN", entry=100.0)))
+        self.assertNotIn("@", line)
+
+    def test_open_line_shows_the_actual_entry(self):
+        b = broker()
+        b.open_from_signal(make_signal("MORPHO", price=100.0))
+        pos = b.open_positions()[0]
+        self.assertEqual(pos["status"], "OPEN")
+        line = format_position_line(pos)
+        self.assertIn("مفتوح", line)
+        self.assertIn("100.0000", line)
+        self.assertIn("باقٍ 100%", line)
+
+    def test_open_line_never_falls_back_to_entry_high_when_entry_exists(self):
+        """`entry` الحقيقي هو المعروض، لا سقف المنطقة."""
+        b = broker()
+        b.open_from_signal(make_signal("SOL", price=99.0, entry_high=101.0))
+        pos = b.open_positions()[0]
+        self.assertIn("99.0000", format_position_line(pos))
+        self.assertNotIn("101.0000", format_position_line(pos))
+
+    def test_report_does_not_print_zero_excursions_for_a_pending_order(self):
+        """صفر MFE/MAE لأمر لم يدخل ليس قياساً، فلا يُعرض كأنه قياس."""
+        b = broker()
+        b.open_from_signal(make_signal("ZEC", price=120.0))
+        text = b.report()
+        self.assertIn("لم يدخل بعد", text)
+        self.assertNotIn("MFE +0.00%", text)
+
+    def test_report_counts_filled_and_pending_separately(self):
+        """«9 مراكز» لا تعني 9 صفقات منفَّذة، فلا يجمعهما عدّاد واحد."""
+        b = broker()
+        b.open_from_signal(make_signal("MORPHO", price=100.0))     # منفَّذ
+        b.open_from_signal(make_signal("ZEC", price=120.0))        # معلّق
+        b.open_from_signal(make_signal("UNI", price=130.0))        # معلّق
+        text = b.report()
+        self.assertIn("مراكز منفَّذة: 1", text)
+        self.assertIn("أوامر معلّقة: 2", text)
+        self.assertNotIn("مراكز مفتوحة: 3", text)
+
+    def test_closed_report_also_separates_filled_from_pending(self):
+        b = broker()
+        b.open_from_signal(make_signal("SOL", price=100.0))
+        b.update({"sol": 145.0})                                   # صفقة مغلقة
+        b.open_from_signal(make_signal("ZEC", price=120.0))        # معلّق
+        text = b.report()
+        self.assertIn("الصفقات المغلقة: 1", text)
+        self.assertIn("المنفَّذة المفتوحة: 0", text)
+        self.assertIn("أوامر معلّقة: 1", text)
+
+    def test_report_still_prints_excursions_for_a_filled_position(self):
+        b = broker()
+        b.open_from_signal(make_signal("MORPHO", price=100.0))
+        b.apply_candles({"morpho": [Bar(int(time.time()) + 86400, 100.0, 106.0, 95.0, 104.0)]})
+        text = b.report()
+        self.assertIn("MFE +6.00%", text)
+        self.assertIn("MAE -5.00%", text)
 
 
 class TestEngineIntegration(unittest.TestCase):
