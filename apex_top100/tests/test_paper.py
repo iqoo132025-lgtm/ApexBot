@@ -293,6 +293,119 @@ class TestPaperStats(unittest.TestCase):
         self.assertNotEqual(b.equity(), 1000.0)
 
 
+class TestDrawdownAndExcursions(unittest.TestCase):
+    """
+    مقاييس متابعة الـ Forward Test: أقصى تراجع على رأس المال المحقق،
+    و MFE/MAE المحفوظان لكل مركز. كلها قراءة فقط ولا تمسّ قواعد الدخول والخروج.
+    """
+
+    @staticmethod
+    def bars(*rows):
+        t0 = int(time.time())
+        return [Bar(t0 + d * 86400, o, h, l, c) for d, o, h, l, c in rows]
+
+    @staticmethod
+    def _loser(b, symbol):
+        b.open_from_signal(make_signal(symbol, price=100.0))
+        b.update({symbol.lower(): 85.0})              # تحت الإبطال 90
+
+    @staticmethod
+    def _winner(b, symbol):
+        b.open_from_signal(make_signal(symbol, price=100.0))
+        b.update({symbol.lower(): 145.0})             # فوق TP3
+
+    def test_curve_last_point_matches_equity(self):
+        b = broker()
+        self._winner(b, "SOL")
+        self._loser(b, "ADA")
+        curve = b.realized_equity_curve()
+        self.assertEqual(len(curve), 2)
+        self.assertAlmostEqual(curve[-1]["equity"], b.equity(), places=2)
+
+    def test_drawdown_compounds_over_consecutive_losses(self):
+        one, two = broker(), broker()
+        self._loser(one, "SOL")
+        self._loser(two, "SOL")
+        self._loser(two, "ADA")
+        dd1 = one.max_drawdown()["max_dd_pct"]
+        dd2 = two.max_drawdown()["max_dd_pct"]
+        self.assertLess(dd1, 0.0, "خسارة واحدة تُنتج تراجعاً سالباً")
+        self.assertLess(dd2, dd1, "خسارتان متتاليتان تُعمّقان التراجع")
+        compounded = ((1 + dd1 / 100.0) ** 2 - 1) * 100.0
+        self.assertAlmostEqual(dd2, compounded, delta=0.02)
+
+    def test_peak_before_any_win_is_the_start_equity(self):
+        b = broker()
+        self._loser(b, "SOL")
+        dd = b.max_drawdown()
+        self.assertEqual(dd["dd_from"], b.cfg.start_equity)
+        self.assertLess(dd["dd_to"], b.cfg.start_equity)
+
+    def test_drawdown_measured_from_the_peak_not_from_the_start(self):
+        b = broker()
+        self._winner(b, "SOL")
+        self._loser(b, "ADA")
+        dd = b.max_drawdown()
+        self.assertGreater(dd["dd_from"], b.cfg.start_equity,
+                           "القمة بعد صفقة رابحة أعلى من رأس المال الابتدائي")
+        self.assertEqual(dd["peak_equity"], dd["dd_from"])
+
+    def test_open_positions_never_move_the_drawdown(self):
+        """
+        `equity()` لا يحتسب المراكز المفتوحة، فالتراجع المقيس تحفّظي:
+        مركز هابط لم يُغلق بعد يظهر في MAE لا في أقصى التراجع.
+        """
+        b = broker()
+        b.open_from_signal(make_signal("SOL", price=100.0))
+        b.apply_candles({"sol": self.bars((1, 100.0, 101.0, 91.0, 92.0))})
+        pos = b.open_positions()[0]
+        self.assertLess(pos["mae_pct"], 0.0, "المركز تحرّك ضدنا فعلاً")
+        self.assertEqual(b.max_drawdown()["max_dd_pct"], 0.0)
+
+    def test_stats_carry_mfe_and_mae(self):
+        b = broker()
+        b.open_from_signal(make_signal("SOL", price=100.0))
+        b.apply_candles({"sol": self.bars((1, 100.0, 108.0, 99.0, 106.0),
+                                          (2, 106.0, 106.0, 89.0, 90.0))})
+        s = b.stats()
+        self.assertEqual(s["trades"], 1)
+        self.assertAlmostEqual(s["avg_mfe_pct"], 8.0, delta=0.1)    # قمة اليوم الأول
+        self.assertAlmostEqual(s["avg_mae_pct"], -11.0, delta=0.1)  # قاع اليوم الثاني
+        self.assertEqual(s["best_mfe_pct"], s["avg_mfe_pct"])
+        self.assertEqual(s["worst_mae_pct"], s["avg_mae_pct"])
+
+    def test_high_after_an_assumed_stop_is_not_counted_as_mfe(self):
+        """
+        الشمعة التي تضرب الوقف وترتفع: السياسة تفترض الوقف أولاً، فالارتفاع
+        بعده حركة لمركز مُغلق ولا يُحتسب MFE. تثبيت هذا يمنع تجميل الأرقام.
+        """
+        b = broker()
+        b.open_from_signal(make_signal("SOL", price=100.0))
+        b.apply_candles({"sol": self.bars((1, 100.0, 108.0, 89.0, 95.0))})
+        s = b.stats()
+        self.assertEqual(s["trades"], 1)
+        self.assertEqual(s["avg_mfe_pct"], 0.0)
+        self.assertAlmostEqual(s["avg_mae_pct"], -11.0, delta=0.1)
+
+    def test_report_prints_the_new_metrics(self):
+        b = broker()
+        self._winner(b, "SOL")
+        self._loser(b, "ADA")
+        text = b.report()
+        for needle in ("أقصى تراجع محقق", "متوسط MFE", "متوسط MAE"):
+            self.assertIn(needle, text)
+
+    def test_report_shows_open_excursions_before_any_close(self):
+        """أول تقرير في الاختبار يأتي وما أُغلقت صفقة بعد — لا يصح أن يكون فارغاً."""
+        b = broker()
+        b.open_from_signal(make_signal("SOL", price=100.0))
+        b.apply_candles({"sol": self.bars((1, 100.0, 106.0, 95.0, 104.0))})
+        text = b.report()
+        self.assertIn("لا صفقات مغلقة بعد", text)
+        self.assertIn("SOL", text)
+        self.assertIn("MFE", text)
+
+
 class TestEngineIntegration(unittest.TestCase):
     def test_engine_opens_and_manages_paper_positions(self):
         with tempfile.TemporaryDirectory() as tmp:

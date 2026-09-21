@@ -403,6 +403,45 @@ class PaperBroker:
             (limit,)).fetchall()
         return [dict(r) for r in rows]
 
+    def realized_equity_curve(self) -> List[dict]:
+        """
+        رأس المال الورقي بعد كل صفقة مغلقة، مرتباً بزمن الإغلاق.
+
+        لا يُشتق من جدول `paper_equity` لأنه صف واحد لكل يوم: لو أُغلقت
+        صفقتان في اليوم نفسه ذاب التراجع بينهما. القيمة الأخيرة هنا تطابق
+        `equity()` لأن حاصل الضرب لا يتأثر بالترتيب.
+        """
+        eq = self.cfg.start_equity
+        out: List[dict] = []
+        for r in self.conn.execute(
+                "SELECT closed_at, symbol, size_pct, realized_pct FROM paper_positions "
+                "WHERE status='CLOSED' ORDER BY closed_at ASC, id ASC"):
+            eq *= 1 + (r["size_pct"] or 0) / 100.0 * (r["realized_pct"] or 0) / 100.0
+            out.append({"closed_at": r["closed_at"], "symbol": r["symbol"],
+                        "equity": round(eq, 2)})
+        return out
+
+    def max_drawdown(self) -> dict:
+        """
+        أقصى تراجع على رأس المال **المحقق**: قمة إلى قاع على منحنى الصفقات المغلقة.
+
+        المراكز المفتوحة خارج الحساب لأن `equity()` لا يحتسبها، فالرقم
+        تحفّظي بطبعه: هبوط مركز لم يُغلق بعد لا يظهر هنا. يُقرأ مع MFE/MAE
+        اللذين يقيسان حركة المركز نفسه لا حركة رأس المال.
+        """
+        peak = trough = float(self.cfg.start_equity)
+        worst = 0.0
+        dd_from = peak
+        for point in self.realized_equity_curve():
+            eq = point["equity"]
+            if eq > peak:
+                peak = eq
+            dd = (eq / peak - 1) * 100.0 if peak else 0.0
+            if dd < worst:
+                worst, dd_from, trough = dd, peak, eq
+        return {"max_dd_pct": round(worst, 2), "dd_from": round(dd_from, 2),
+                "dd_to": round(trough, 2), "peak_equity": round(peak, 2)}
+
     def stats(self) -> dict:
         rows = [dict(r) for r in self.conn.execute(
             "SELECT * FROM paper_positions WHERE status='CLOSED'").fetchall()]
@@ -417,6 +456,8 @@ class PaperBroker:
         for r in rows:
             by_regime.setdefault(r["regime"] or "?", []).append(r["realized_r"] or 0.0)
         holds = [((r["closed_at"] or 0) - (r["opened_at"] or r["signaled_at"])) / 86400.0 for r in rows]
+        mfes = [r["mfe_pct"] or 0.0 for r in rows]
+        maes = [r["mae_pct"] or 0.0 for r in rows]
         return {
             "trades": n,
             "open": len(self.open_positions()),
@@ -429,9 +470,14 @@ class PaperBroker:
             "avg_win_r": round(sum(r["realized_r"] for r in wins) / len(wins), 2) if wins else 0.0,
             "avg_loss_r": round(sum(r["realized_r"] for r in losses) / len(losses), 2) if losses else 0.0,
             "avg_hold_days": round(sum(holds) / n, 1) if holds else 0.0,
+            "avg_mfe_pct": round(sum(mfes) / n, 2),
+            "avg_mae_pct": round(sum(maes) / n, 2),
+            "best_mfe_pct": round(max(mfes), 2),
+            "worst_mae_pct": round(min(maes), 2),
             "by_regime": {k: {"trades": len(v), "avg_r": round(sum(v) / len(v), 2)}
                           for k, v in by_regime.items()},
             "equity": self.equity(),
+            **self.max_drawdown(),
         }
 
     def equity(self) -> float:
@@ -457,8 +503,15 @@ class PaperBroker:
     def report(self) -> str:
         s = self.stats()
         if not s.get("trades"):
-            return (f"Forward Test — لا صفقات مغلقة بعد\n"
-                    f"مراكز مفتوحة: {s['open']} | رأس المال الورقي: ${s['equity']}")
+            lines = ["Forward Test — لا صفقات مغلقة بعد",
+                     f"مراكز مفتوحة: {s['open']} | رأس المال الورقي: ${s['equity']}"]
+            live = self.open_positions()
+            if live:
+                lines += ["", "حركة المراكز المفتوحة حتى الآن (MFE / MAE):"]
+                for pos in live:
+                    lines.append(f"  {pos['symbol']}: MFE {pos['mfe_pct'] or 0.0:+.2f}%"
+                                 f"   MAE {pos['mae_pct'] or 0.0:+.2f}%   ({pos['status']})")
+            return "\n".join(lines)
         lines = [
             "APEX TOP-100 — FORWARD TEST",
             "",
@@ -468,7 +521,12 @@ class PaperBroker:
             f"متوسط الرابحة: {s['avg_win_r']}R   |   متوسط الخاسرة: {s['avg_loss_r']}R",
             f"أفضل: {s['best_r']}R   |   أسوأ: {s['worst_r']}R",
             f"متوسط مدة الصفقة: {s['avg_hold_days']} يوم",
+            f"متوسط MFE: {s['avg_mfe_pct']}%   |   متوسط MAE: {s['avg_mae_pct']}%",
+            f"أعلى MFE: {s['best_mfe_pct']}%   |   أدنى MAE: {s['worst_mae_pct']}%",
             f"رأس المال الورقي: ${s['equity']} (البداية ${self.cfg.start_equity})",
+            f"أقصى تراجع محقق: {s['max_dd_pct']}% "
+            + (f"(من ${s['dd_from']} إلى ${s['dd_to']}، القمة ${s['peak_equity']})"
+               if s["max_dd_pct"] < 0 else "(لم يهبط رأس المال تحت قمته بعد)"),
             "",
             "حسب حالة السوق:",
         ]
