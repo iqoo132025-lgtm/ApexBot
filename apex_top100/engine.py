@@ -153,6 +153,26 @@ class Top100MarketEngine:
                     else 2 if c.coin_id in movers else 3, c.rank)
         return sorted(self.signalable_universe(), key=key)
 
+    def cycle_coins(self) -> List[CoinInfo]:
+        """
+        عملات هذه الدورة: **كل** مركز قائم، ثم ما تبقى من الميزانية للاكتشاف.
+
+        `max_ohlcv_per_cycle` سقف على الاكتشاف لا على الإدارة. المركز بلا شموع
+        لا يُدار إطلاقاً — لا وقف ولا هدف ولا انتهاء نافذة — فإسقاطه توفيراً
+        لطلب يحوّل صفقة قائمة إلى صف ميت في قاعدة البيانات. ولأن الشموع من
+        Binance وحده (`cg_fetch_ohlc=False`)، فتجاوز السقف يكلّف طلبات إضافية
+        بمباعدة `binance_min_interval_sec` ولا يمسّ ميزانية CoinGecko.
+        """
+        ordered = self._priority_order()
+        held = self.held_coin_ids()
+        held_coins = [c for c in ordered if c.coin_id in held]
+        room = max(0, self.cfg.max_ohlcv_per_cycle - len(held_coins))
+        if not room:
+            self.hooks.log(f"{len(held_coins)} مركزاً قائماً يستوعب ميزانية الشموع "
+                           f"({self.cfg.max_ohlcv_per_cycle}) كاملةً — تُسحب شموعها جميعاً "
+                           f"ولا اكتشاف جديد هذه الدورة", "warn")
+        return held_coins + [c for c in ordered if c.coin_id not in held][:room]
+
     def load_ohlcv(self, coins: List[CoinInfo]) -> Dict[str, OHLCV]:
         out: Dict[str, OHLCV] = {}
         for c in coins:
@@ -326,12 +346,7 @@ class Top100MarketEngine:
         self.begin_cycle()
         self.refresh_universe()
         events = self.ensure_daily_snapshot()
-        coins = self._priority_order()[:self.cfg.max_ohlcv_per_cycle]
-        held = self.held_coin_ids()
-        if len(held) >= self.cfg.max_ohlcv_per_cycle:
-            # المراكز وحدها استنفدت الميزانية: تُدار كلها، ولا يبقى ما يُكتشف به جديد.
-            self.hooks.log(f"{len(held)} مركزاً قائماً يستهلك ميزانية الشموع كاملة "
-                           f"({self.cfg.max_ohlcv_per_cycle}) — لا اكتشاف جديد هذه الدورة", "warn")
+        coins = self.cycle_coins()
         for sym in ("BTC", "ETH"):
             c = self._coin(sym)
             if c and c not in coins:

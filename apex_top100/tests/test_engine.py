@@ -378,6 +378,49 @@ class TestHeldPositionsKeepTheirCandles(unittest.TestCase):
             self.assertEqual(eng.held_coin_ids(), set())
             self.assertTrue(eng._priority_order())
 
+    def test_every_held_position_is_fetched_even_beyond_the_budget(self):
+        """
+        الميزانية سقف على الاكتشاف لا على الإدارة: ثلاثة مراكز وميزانية اثنين
+        تعني ثلاث عمليات سحب، لا اثنتين ومركزاً متروكاً. إسقاط مركز توفيراً
+        لطلب يحوّله إلى صف ميت: لا وقف ولا هدف ولا انتهاء نافذة.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(tmp, budget=2)
+            held = sorted(eng.signalable_universe(), key=lambda c: c.rank)[-3:]
+            for coin in held:
+                self._hold(eng, coin)
+            picked = [c.coin_id for c in eng.cycle_coins()]
+            for coin in held:
+                self.assertIn(coin.coin_id, picked)
+            self.assertEqual(len(picked), 3, "لا اكتشاف يُضاف حين تستوعب المراكز الميزانية")
+
+    def test_all_held_positions_are_managed_by_a_cycle_beyond_the_budget(self):
+        """نفس الحالة عبر دورة كاملة: الثلاثة تتحرك لهم MFE/MAE فعلاً."""
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(tmp, budget=2)
+            held = sorted(eng.signalable_universe(), key=lambda c: c.rank)[-3:]
+            for coin in held:
+                self._hold(eng, coin)
+            eng.provider.advance(1)
+            eng.run_once()
+            rows = {p["coin_id"]: p for p in eng.paper.open_positions()}
+            for coin in held:
+                self.assertIn(coin.coin_id, eng.ohlcv_cache, f"{coin.symbol} بلا شموع")
+                self.assertGreater(rows[coin.coin_id]["mfe_pct"], 0.0,
+                                   f"{coin.symbol} مركز قائم لم يُدَر")
+
+    def test_discovery_takes_only_what_the_positions_leave(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(tmp, budget=5)
+            held = sorted(eng.signalable_universe(), key=lambda c: c.rank)[-2:]
+            for coin in held:
+                self._hold(eng, coin)
+            picked = eng.cycle_coins()
+            self.assertEqual(len(picked), 5, "المجموع يبقى عند الميزانية ما دام فيها متسع")
+            ids = [c.coin_id for c in picked]
+            for coin in held:
+                self.assertIn(coin.coin_id, ids)
+
     def test_a_cycle_warns_when_positions_eat_the_whole_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
             eng = self._engine(tmp, budget=2)
@@ -385,7 +428,15 @@ class TestHeldPositionsKeepTheirCandles(unittest.TestCase):
                 self._hold(eng, coin)
             eng.run_once()
             warns = [m for lvl, m in eng.hooks.logs if lvl == "warn" and "ميزانية الشموع" in m]
-            self.assertTrue(warns, "استنفاد الميزانية بالمراكز وحدها يجب أن يُقال صراحة")
+            self.assertTrue(warns, "توقّف الاكتشاف يجب أن يُقال صراحة لا أن يُكتشف لاحقاً")
+
+    def test_no_warning_while_discovery_still_has_room(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(tmp, budget=5)
+            self._hold(eng, self._worst_ranked(eng))
+            eng.run_once()
+            warns = [m for lvl, m in eng.hooks.logs if lvl == "warn" and "ميزانية الشموع" in m]
+            self.assertFalse(warns)
 
 
 class TestLoggingSignature(unittest.TestCase):
