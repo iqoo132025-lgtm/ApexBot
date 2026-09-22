@@ -18,6 +18,7 @@ from apex_top100.providers_mock import MockDataProvider
 from apex_top100.regime import detect_regime
 from apex_top100.snapshots import SnapshotStore
 from apex_top100.telegram_signals import format_top100_signal, signal_buttons
+from apex_top100.tests.test_paper import make_signal
 
 
 class QuietHooks(ApexHooks):
@@ -274,6 +275,117 @@ class TestMockProviderDeterminism(unittest.TestCase):
         sig = analyze_coin(weak, provider.fetch_ohlcv(weak), up, up, Top100Config(), reg)
         self.assertFalse(sig.tradable)
         self.assertIn("الاتجاه الأسبوعي غير داعم", sig.flags)
+
+
+class TestHeldPositionsKeepTheirCandles(unittest.TestCase):
+    """
+    المركز القائم يُدار من شموع الدورة وحدها: `update_paper` يقرأ من
+    `ohlcv_cache`، فعملة لم تُسحب شموعها هذه الدورة لا تتحرك لها MFE/MAE،
+    ولا يُفحص وقفها ولا أهدافها، ولا تنتهي نافذة دخولها لأن فحص الانتهاء
+    داخل معالجة الشمعة. ميزانية `max_ohlcv_per_cycle` أصغر من الكون، فبلا
+    أولوية للمركز القائم تتجمّد الصفقة بصمت وتُقرأ كأنها معلومة عن السوق.
+    """
+
+    def _engine(self, tmp, n=14, budget=3):
+        cfg = Top100Config(universe_size=n, db_path=os.path.join(tmp, "t.db"),
+                           cache_dir=os.path.join(tmp, "cache"),
+                           max_ohlcv_per_cycle=budget, min_score=60)
+        eng = Top100MarketEngine(cfg=cfg, provider=MockDataProvider(n=n),
+                                 store=SnapshotStore(cfg.db_path), hooks=QuietHooks())
+        eng.refresh_universe(force=True)
+        return eng
+
+    @staticmethod
+    def _worst_ranked(eng):
+        """أسوأ عملة ترتيباً — خارج الميزانية بلا شك."""
+        return sorted(eng.signalable_universe(), key=lambda c: c.rank)[-1]
+
+    @staticmethod
+    def _hold(eng, coin):
+        """مركز ورقي مفتوح على هذه العملة بأهداف بعيدة لا تُضرب في شمعة واحدة."""
+        price = coin.price
+        sig = make_signal(coin.symbol, price=price, rank=coin.rank,
+                          entry_low=price * 0.98, entry_high=price * 1.02,
+                          invalidation=price * 0.90,
+                          tp1=price * 1.2, tp2=price * 1.4, tp3=price * 1.6)
+        return eng.paper.open_from_signal(sig)
+
+    def test_a_held_coin_outside_the_budget_is_pulled_into_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(tmp)
+            coin = self._worst_ranked(eng)
+            self.assertNotIn(coin.coin_id,
+                             [c.coin_id for c in eng._priority_order()[:eng.cfg.max_ohlcv_per_cycle]],
+                             "العملة يجب أن تكون خارج الميزانية قبل فتح المركز")
+            self._hold(eng, coin)
+            self.assertIn(coin.coin_id,
+                          [c.coin_id for c in eng._priority_order()[:eng.cfg.max_ohlcv_per_cycle]])
+
+    def test_holding_moves_the_coin_first_and_disturbs_nothing_else(self):
+        """الترتيب النسبي لبقية الكون لا يتغير — الإصلاح يضيف طبقة ولا يعيد ترتيب شيء."""
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(tmp)
+            before = [c.coin_id for c in eng._priority_order()]
+            coin = self._worst_ranked(eng)
+            self._hold(eng, coin)
+            after = [c.coin_id for c in eng._priority_order()]
+            self.assertEqual(after[0], coin.coin_id)
+            self.assertEqual(after[1:], [cid for cid in before if cid != coin.coin_id])
+
+    def test_a_pending_order_counts_as_held(self):
+        """الأمر المعلّق يحتاج الشموع أكثر: بلا شمعة لا يدخل ولا تنتهي نافذته."""
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(tmp)
+            coin = self._worst_ranked(eng)
+            price = coin.price
+            sig = make_signal(coin.symbol, price=price * 1.30, rank=coin.rank,
+                              entry_low=price * 0.98, entry_high=price * 1.02,
+                              invalidation=price * 0.90,
+                              tp1=price * 1.2, tp2=price * 1.4, tp3=price * 1.6)
+            eng.paper.open_from_signal(sig)
+            self.assertEqual(eng.paper.open_positions()[0]["status"], "PENDING")
+            self.assertIn(coin.coin_id, eng.held_coin_ids())
+            self.assertIn(coin.coin_id,
+                          [c.coin_id for c in eng._priority_order()[:eng.cfg.max_ohlcv_per_cycle]])
+
+    def test_a_low_ranked_position_is_actually_managed_by_a_full_cycle(self):
+        """الاختبار الذي يهم: دورة كاملة تحرّك MFE/MAE لمركز خارج الميزانية."""
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(tmp)
+            coin = self._worst_ranked(eng)
+            self._hold(eng, coin)
+            pos = eng.paper.open_positions()[0]
+            self.assertEqual(pos["status"], "OPEN")
+            self.assertEqual(pos["mfe_pct"], 0.0)
+            eng.provider.advance(1)
+            eng.run_once()
+            after = [p for p in eng.paper.open_positions() if p["coin_id"] == coin.coin_id][0]
+            self.assertIn(coin.coin_id, eng.ohlcv_cache, "شموع المركز تُسحب في الدورة")
+            self.assertGreater(after["mfe_pct"], 0.0, "المركز تُدار حركته فعلاً")
+            self.assertLess(after["mae_pct"], 0.0)
+
+    def test_order_is_unchanged_when_nothing_is_held(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(tmp)
+            self.assertEqual(eng.held_coin_ids(), set())
+            ranks = [c.rank for c in eng._priority_order()]
+            self.assertEqual(ranks, sorted(ranks), "بلا مراكز، الترتيب يبقى بالترتيب السوقي")
+
+    def test_priority_order_survives_a_disabled_paper_broker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(tmp)
+            eng.paper = None
+            self.assertEqual(eng.held_coin_ids(), set())
+            self.assertTrue(eng._priority_order())
+
+    def test_a_cycle_warns_when_positions_eat_the_whole_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eng = self._engine(tmp, budget=2)
+            for coin in sorted(eng.signalable_universe(), key=lambda c: c.rank)[-3:]:
+                self._hold(eng, coin)
+            eng.run_once()
+            warns = [m for lvl, m in eng.hooks.logs if lvl == "warn" and "ميزانية الشموع" in m]
+            self.assertTrue(warns, "استنفاد الميزانية بالمراكز وحدها يجب أن يُقال صراحة")
 
 
 class TestLoggingSignature(unittest.TestCase):

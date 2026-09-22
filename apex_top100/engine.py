@@ -129,11 +129,28 @@ class Top100MarketEngine:
         """
         return [c for c in self.universe if c.signalable(self.cfg)]
 
+    def held_coin_ids(self) -> set:
+        """عملات لها مركز ورقي قائم — OPEN أو PENDING."""
+        if not self.paper:
+            return set()
+        return {p["coin_id"] for p in self.paper.open_positions()}
+
     def _priority_order(self) -> List[CoinInfo]:
-        """أولوية السحب: الداخل الجديد، ثم صاعدو الترتيب، ثم الأعلى ترتيباً."""
+        """
+        أولوية السحب: المركز القائم، ثم الداخل الجديد، ثم صاعدو الترتيب، ثم الأعلى ترتيباً.
+
+        المركز القائم يسبق الاكتشاف لأن إدارته تعتمد كلياً على شموع هذه الدورة:
+        `update_paper` يقرأ من `ohlcv_cache`، فعملة لم تُسحب شموعها لا تتحرك لها
+        MFE/MAE، ولا يُفحص وقفها ولا أهدافها، ولا تنتهي نافذة دخولها — لأن فحص
+        الانتهاء نفسه داخل معالجة الشمعة. صفقة لا تُدار ليست قياساً ناقصاً بل
+        ليست قياساً أصلاً، واكتشاف عملة جديدة لا يسبق ذلك أبداً.
+        """
+        held = self.held_coin_ids()
         movers = {m["coin_id"] for m in self.store.top_rank_movers(days=30, limit=15)}
         def key(c: CoinInfo):
-            return (0 if c.coin_id in self.new_entries else 1 if c.coin_id in movers else 2, c.rank)
+            return (0 if c.coin_id in held
+                    else 1 if c.coin_id in self.new_entries
+                    else 2 if c.coin_id in movers else 3, c.rank)
         return sorted(self.signalable_universe(), key=key)
 
     def load_ohlcv(self, coins: List[CoinInfo]) -> Dict[str, OHLCV]:
@@ -310,6 +327,11 @@ class Top100MarketEngine:
         self.refresh_universe()
         events = self.ensure_daily_snapshot()
         coins = self._priority_order()[:self.cfg.max_ohlcv_per_cycle]
+        held = self.held_coin_ids()
+        if len(held) >= self.cfg.max_ohlcv_per_cycle:
+            # المراكز وحدها استنفدت الميزانية: تُدار كلها، ولا يبقى ما يُكتشف به جديد.
+            self.hooks.log(f"{len(held)} مركزاً قائماً يستهلك ميزانية الشموع كاملة "
+                           f"({self.cfg.max_ohlcv_per_cycle}) — لا اكتشاف جديد هذه الدورة", "warn")
         for sym in ("BTC", "ETH"):
             c = self._coin(sym)
             if c and c not in coins:
