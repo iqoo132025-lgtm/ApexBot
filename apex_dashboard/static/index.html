@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>APEX Live Dashboard</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"
+        integrity="sha384-stKllnUqA9AD0gsKCuUtf5XlqAW7PwIgDagoNsTWkjkBmJ/GZ/uHTgEBxdLV2VSK"
+        crossorigin="anonymous"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">APEX</span>
+    <span class="mode-pill" id="modePill">APEX LIVE / PAPER</span>
+    <span class="exec-pill" id="execPill">auto_execute=False</span>
+  </div>
+  <div class="health">
+    <span class="dot" id="loopDot"></span><span id="loopText">الحلقة: —</span>
+    <span class="dot" id="wsDot"></span><span id="wsText">Binance WS: —</span>
+    <span class="muted" id="refreshText"></span>
+  </div>
+</header>
+
+<main>
+  <section class="kpis" id="kpis">
+    <div class="kpi"><div class="k-label">Market Regime</div><div class="k-value" id="kRegime">—</div><div class="k-sub" id="kRegimeSub"></div></div>
+    <div class="kpi"><div class="k-label">Paper Equity</div><div class="k-value" id="kEquity">—</div><div class="k-sub" id="kEquitySub"></div></div>
+    <div class="kpi"><div class="k-label">P&amp;L المحقق</div><div class="k-value" id="kPnl">—</div><div class="k-sub" id="kPnlSub"></div></div>
+    <div class="kpi"><div class="k-label">غير محقق (تقديري)</div><div class="k-value" id="kUnreal">—</div><div class="k-sub" id="kUnrealSub"></div></div>
+    <div class="kpi"><div class="k-label">Max Drawdown</div><div class="k-value" id="kDd">—</div><div class="k-sub">على رأس المال المحقق</div></div>
+    <div class="kpi counts">
+      <div class="k-label">المراكز</div>
+      <div class="count-row">
+        <span class="c open"><b id="cOpen">0</b> OPEN</span>
+        <span class="c pending"><b id="cPending">0</b> PENDING</span>
+        <span class="c closed"><b id="cClosed">0</b> CLOSED</span>
+        <span class="c expired"><b id="cExpired">0</b> EXPIRED</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>الصفقات الورقية</h2>
+      <div class="filters" id="filters">
+        <button data-f="" class="on">الكل</button>
+        <button data-f="OPEN">OPEN</button>
+        <button data-f="PENDING">PENDING</button>
+        <button data-f="CLOSED">CLOSED</button>
+        <button data-f="EXPIRED">EXPIRED</button>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table class="positions" id="positions">
+        <thead><tr>
+          <th>العملة</th><th>الحالة</th><th>الإشارة (UTC)</th><th>الدخول</th>
+          <th>السعر الحي</th><th>P&amp;L</th><th>MFE</th><th>MAE</th><th>الأهداف</th>
+          <th>الوقف</th><th>Score</th><th>Regime</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="posEmpty" hidden>لا مراكز بهذه الحالة</div>
+    </div>
+  </section>
+
+  <section class="panel detail" id="detail" hidden>
+    <div class="panel-head">
+      <h2 id="dTitle">—</h2>
+      <div class="d-meta" id="dMeta"></div>
+    </div>
+    <div class="chart-legend" id="legend"></div>
+    <div class="chart" id="chart" dir="ltr"></div>
+    <div class="rsi" id="rsi" dir="ltr"></div>
+    <div class="chart-note" id="chartNote"></div>
+    <h3>Execution Timeline</h3>
+    <ol class="timeline" id="timeline" dir="ltr"></ol>
+    <p class="muted small">PAPER / auto_execute=False: لا أمر يُرسل إلى منصة، فعمود latency فارغ حتى محرك التنفيذ المستقبلي. الأزمنة المعلَّمة «مستنتج» مشتقة من الشموع لأن الجدول يحفظ تحقق الهدف لا زمنه.</p>
+  </section>
+
+  <div class="two-col">
+    <section class="panel">
+      <div class="panel-head"><h2>الأداء</h2></div>
+      <div class="stats" id="stats"></div>
+      <div class="equity-chart" id="equityChart" dir="ltr"></div>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2>آخر الإشارات</h2></div>
+      <div class="table-wrap">
+        <table class="signals" id="signals">
+          <thead><tr><th>الوقت (UTC)</th><th>العملة</th><th>Rank</th><th>Score</th><th>Regime</th><th>منطقة الدخول</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <footer class="muted small">
+    طبقة مراقبة للقراءة فقط: SQLite مفتوح بوضع <code>mode=ro</code>، والشموع من كاش المحرك.
+    الأسعار الحية من Binance WebSocket للعرض فقط — إدارة المراكز الورقية تبقى في دورة المحرك على الشموع اليومية.
+  </footer>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

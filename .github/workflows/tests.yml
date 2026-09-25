@@ -24,7 +24,7 @@ jobs:
 
       # المحرك والاختبارات تعمل بالمكتبة القياسية فقط — لا تثبيت تبعيات ولا شبكة
       - name: Compile all sources
-        run: python -m compileall -q apex_top100 APEX_ULTIMATE.py APEX_FUTURES.py run_top100.py
+        run: python -m compileall -q apex_top100 apex_dashboard APEX_ULTIMATE.py APEX_FUTURES.py run_top100.py run_dashboard.py
 
       - name: Top 100 engine tests
         run: python -m apex_top100.tests.test_engine
@@ -37,6 +37,9 @@ jobs:
 
       - name: APEX integration tests
         run: python -m apex_top100.tests.test_apex_hook
+
+      - name: Dashboard (read-only API) tests
+        run: python -m apex_dashboard.tests.test_dashboard
 
       - name: Fail if credentials are hardcoded
         run: |
