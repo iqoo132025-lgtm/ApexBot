@@ -5,7 +5,13 @@
   "use strict";
 
   const REFRESH_MS = 15000;
-  const WS_BASE = "wss://stream.binance.com:9443/stream?streams=";
+  // الأساسي أولاً؛ إن لم يُفتح الاتصال ننتقل إلى خادم Binance الرسمي لبيانات السوق على 443
+  // (بعض الشبكات تحجب المنفذ 9443). المصدر المستخدم يظهر في الشريط ولا يُخفى.
+  const WS_ENDPOINTS = [
+    { label: "primary", base: "wss://stream.binance.com:9443" },
+    { label: "fallback", base: "wss://data-stream.binance.vision" },
+  ];
+  const WS_OPEN_TIMEOUT_MS = 8000;
   const LWC = window.LightweightCharts;
 
   const state = {
@@ -14,7 +20,7 @@
     selectedId: null,
     status: null,
     live: {},            // PAIR -> آخر سعر من WS
-    ws: null, wsKey: "",
+    ws: null, wsKey: "", wsIdx: 0, wsGen: 0, wsDebounce: null,
     chart: null, rsiChart: null, candle: null, volume: null, rsiLine: null,
     chartPair: null, chartBars: [], priceLines: [],
     equityChart: null, equityLine: null,
@@ -293,7 +299,7 @@
       const from = Math.max(0, bars.length - 120);
       state.chart.timeScale().setVisibleLogicalRange({ from, to: bars.length + 3 });
     }
-    connectWs();
+    scheduleWs();
   }
 
   function renderTimeline(stages) {
@@ -311,28 +317,64 @@
   // ══════════════════════════════════════
   //  Binance WebSocket — عرض فقط
   // ══════════════════════════════════════
+  // عدة أحداث تطلب إعادة الاتصال معاً (تحميل الجدول ثم فتح الشارت): نجمعها في طلب واحد
+  // حتى لا نغلق اتصالاً قبل أن يكتمل فتحه.
+  function scheduleWs() {
+    clearTimeout(state.wsDebounce);
+    state.wsDebounce = setTimeout(connectWs, 400);
+  }
+
   function connectWs() {
     const pairs = new Set(state.positions.filter((p) => p.status === "OPEN" || p.status === "PENDING").map((p) => p.pair.toLowerCase()));
     const streams = [...pairs].map((p) => p + "@miniTicker");
     if (state.chartPair) streams.push(state.chartPair.toLowerCase() + "@kline_1d");
     const key = streams.sort().join("/");
     if (key === state.wsKey && state.ws && state.ws.readyState <= 1) return;
-    if (state.ws) { state.ws.onclose = null; state.ws.close(); }
+    const gen = ++state.wsGen;
+    if (state.ws) { const old = state.ws; old.onopen = old.onclose = old.onerror = old.onmessage = null; old.close(); }
+    state.ws = null;
     state.wsKey = key;
     if (!streams.length) { setWs("", "Binance WS: لا أزواج نشطة"); return; }
+    const ep = WS_ENDPOINTS[state.wsIdx];
     let ws;
-    try { ws = new WebSocket(WS_BASE + key); } catch (e) { setWs("bad", "Binance WS: تعذّر الاتصال"); return; }
+    try { ws = new WebSocket(`${ep.base}/stream?streams=${key}`); } catch (e) { return wsFailed(gen, ep, "constructor"); }
     state.ws = ws;
-    setWs("warn", "Binance WS: يتصل…");
-    ws.onopen = () => setWs("ok", `Binance WS: ${streams.length} stream`);
-    ws.onerror = () => setWs("bad", "Binance WS: خطأ");
-    ws.onclose = () => { setWs("bad", "Binance WS: انقطع — إعادة المحاولة"); state.wsKey = ""; setTimeout(connectWs, 5000); };
+    let opened = false;
+    setWs("warn", `Binance WS • ${ep.label}: يتصل…`);
+    const timer = setTimeout(() => { if (!opened && gen === state.wsGen) ws.close(); }, WS_OPEN_TIMEOUT_MS);
+    ws.onopen = () => {
+      opened = true; clearTimeout(timer);
+      setWs("ok", `Binance WS • ${ep.label} · ${streams.length} stream`);
+      console.info(`APEX: Binance WS متصل عبر ${ep.label} (${ep.base})`);
+    };
+    ws.onclose = (ev) => {
+      clearTimeout(timer);
+      if (gen !== state.wsGen) return;
+      state.wsKey = "";
+      if (!opened) return wsFailed(gen, ep, "code " + ev.code);
+      setWs("bad", `Binance WS • ${ep.label}: انقطع — إعادة المحاولة`);
+      setTimeout(connectWs, 5000);
+    };
     ws.onmessage = (ev) => {
       let msg; try { msg = JSON.parse(ev.data); } catch (e) { return; }
       const d = msg.data || {};
       if (d.e === "24hrMiniTicker") onTicker(d.s, Number(d.c));
       else if (d.e === "kline") onKline(d.s, d.k);
     };
+  }
+
+  // الاتصال لم يُفتح أصلاً: ننتقل إلى المصدر التالي. بعد فشل الكل نعود إلى الأساسي بعد مهلة.
+  function wsFailed(gen, ep, why) {
+    if (gen !== state.wsGen) return;
+    state.wsKey = "";
+    state.wsIdx = (state.wsIdx + 1) % WS_ENDPOINTS.length;
+    const next = WS_ENDPOINTS[state.wsIdx];
+    console.warn(`APEX: Binance WS ${ep.label} (${ep.base}) لم يُفتح (${why}) — ننتقل إلى ${next.label} (${next.base})`);
+    const wrapped = state.wsIdx === 0;
+    setWs(wrapped ? "bad" : "warn", wrapped
+      ? "Binance WS: فشل primary و fallback — إعادة المحاولة"
+      : `Binance WS • ${ep.label} فشل — تجربة ${next.label}`);
+    setTimeout(connectWs, wrapped ? 15000 : 300);
   }
   function setWs(c, t) { $("wsDot").className = "dot " + c; $("wsText").textContent = t; }
 
@@ -419,7 +461,7 @@
       renderPositions();
       renderPerformance(perf);
       renderSignals(sig.signals);
-      connectWs();
+      scheduleWs();
       // الشارت المفتوح يتبع الدورة أيضاً (مستويات، علامات، Timeline) دون إعادة ضبط التكبير
       if (state.selectedId !== null && !$("detail").hidden) selectPosition(state.selectedId, { scroll: false, keepRange: true });
     } catch (err) {

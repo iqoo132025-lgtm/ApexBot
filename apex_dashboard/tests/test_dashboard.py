@@ -331,6 +331,13 @@ class TestServer(Base):
         self.assertEqual(self.req("/static/../api.py")[0], 404)
         self.assertEqual(self.req("/static/%2e%2e/api.py")[0], 404)
 
+    def test_live_prices_fall_back_to_the_market_data_endpoint(self):
+        # بعض الشبكات تحجب 9443: الواجهة تعلن المصدرين وتنتقل إلى 443 عند فشل الأساسي
+        js = self.req("/static/app.js")[2].decode("utf-8")
+        self.assertIn('"wss://stream.binance.com:9443"', js)
+        self.assertIn('"wss://data-stream.binance.vision"', js)
+        self.assertIn("function wsFailed", js)
+
     def test_writes_are_refused(self):
         before = digest(self.db)
         for m in ("POST", "PUT", "PATCH", "DELETE"):
