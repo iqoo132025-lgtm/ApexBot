@@ -15,6 +15,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# Force UTF-8 on Windows so redirected Arabic output cannot crash the engine loop.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 from apex_top100.config import Top100Config
 from apex_top100.integration import ApexV2Bridge, build_engine
 from apex_top100.paper import format_position_line
