@@ -422,6 +422,7 @@ class TestStaleNeverTrades(unittest.TestCase):
     def test_paper_refuses_a_stale_signal(self):
         import sqlite3
         conn = sqlite3.connect(":memory:"); conn.row_factory = sqlite3.Row
+        self.addCleanup(conn.close)
         b = PaperBroker(conn, PaperConfig(slippage_pct=0.0))
         from apex_top100.analysis import Top100Signal
         sig = Top100Signal(symbol="SOL", coin_id="solana", name="SOL", rank=4, price=100.0,
