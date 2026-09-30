@@ -4,6 +4,8 @@ apex_top100_demo.db
 apex_ultimate_state.json
 .apex_cache/
 *.db-journal
+*.db.lock
+logs/
 
 # أسرار
 .env

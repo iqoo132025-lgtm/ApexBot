@@ -42,6 +42,17 @@ def main() -> int:
     ap.add_argument("--paper-report", action="store_true", help="تقرير Paper Trading / Forward Test")
     args = ap.parse_args()
 
+    # حلقة إنتاج واحدة لكل قاعدة بيانات، قبل فتحها. --once و --demo و --paper-report لا تُقفل.
+    # القفل يبقى ما بقيت العملية، والنظام يحرّره عند انتهائها ولو بانهيار.
+    loop_lock = None
+    if args.loop and not args.demo and not args.paper_report:
+        from apex_top100.instance_lock import ALREADY_RUNNING_EXIT, InstanceLock, lock_path_for
+        loop_lock = InstanceLock(lock_path_for(args.db))
+        if not loop_lock.acquire():
+            print(f"[TOP100] حلقة أخرى تعمل على {os.path.abspath(args.db)} — لن تبدأ نسخة ثانية",
+                  file=sys.stderr, flush=True)
+            return ALREADY_RUNNING_EXIT
+
     cfg = Top100Config(universe_size=args.size, min_score=args.min_score, db_path=args.db,
                        telegram_token=args.telegram_token, telegram_chat_id=args.telegram_chat)
 
