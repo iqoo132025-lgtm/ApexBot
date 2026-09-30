@@ -7,7 +7,6 @@ import json
 import os
 import sqlite3
 import sys
-import tempfile
 import time
 import unittest
 
@@ -21,7 +20,7 @@ from apex_top100.data_sources import OHLCV
 from apex_top100.paper import (Bar, PaperBroker, PaperConfig, bars_from_ohlcv,
                                format_position_line)
 from apex_top100.providers_mock import MockDataProvider
-from apex_top100.snapshots import SnapshotStore
+from apex_top100.tests.tmpdb import TmpDbTestCase
 
 
 def make_signal(symbol="SOL", price=100.0, **kw) -> Top100Signal:
@@ -125,7 +124,7 @@ class TestPaperLifecycle(unittest.TestCase):
         self.assertEqual(len(b.open_positions()), 1)
 
 
-class TestCandleExecution(unittest.TestCase):
+class TestCandleExecution(TmpDbTestCase):
     """
     واقعية التنفيذ: الإدارة على شموع OHLC لكل فترة منذ آخر تحديث،
     وسياسة صريحة عندما تلمس الشمعة الهدف والوقف معاً.
@@ -263,9 +262,11 @@ class TestCandleExecution(unittest.TestCase):
         self.assertEqual(bars_from_ohlcv(ohlcv), [])
 
     def test_engine_manages_paper_from_candles(self):
-        cfg = Top100Config(db_path=os.path.join(tempfile.mkdtemp(), "p.db"),
-                           cache_dir=tempfile.mkdtemp(), universe_size=12, min_score=55)
-        eng = Top100MarketEngine(cfg, provider=MockDataProvider(), hooks=None)
+        tmp = self.tmp_dir()
+        cfg = Top100Config(db_path=os.path.join(tmp, "p.db"),
+                           cache_dir=os.path.join(tmp, "cache"), universe_size=12, min_score=55)
+        eng = self.close_engine_store(
+            Top100MarketEngine(cfg, provider=MockDataProvider(), hooks=None))
         eng.run_once()
         self.assertTrue(eng.paper.open_positions())
         pos = eng.paper.open_positions()[0]
@@ -482,22 +483,22 @@ class TestPositionDisplay(unittest.TestCase):
         self.assertIn("MAE -5.00%", text)
 
 
-class TestEngineIntegration(unittest.TestCase):
+class TestEngineIntegration(TmpDbTestCase):
     def test_engine_opens_and_manages_paper_positions(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = Top100Config(universe_size=14, db_path=os.path.join(tmp, "t.db"),
-                               cache_dir=os.path.join(tmp, "c"), max_ohlcv_per_cycle=14,
-                               min_score=55)
-            eng = Top100MarketEngine(cfg=cfg, provider=MockDataProvider(n=14),
-                                     store=SnapshotStore(cfg.db_path))
-            out = eng.run_once()
-            self.assertIsNotNone(eng.paper)
-            self.assertTrue(out["sent"], "نحتاج إشارات لاختبار المسار الورقي")
-            self.assertTrue(eng.paper.open_positions(), "كل إشارة تفتح مركزاً ورقياً")
-            self.assertIsNotNone(out["paper_stats"])
-            self.assertTrue(eng.paper.equity_curve(), "منحنى رأس المال يُسجَّل يومياً")
-            for p in eng.paper.open_positions():
-                self.assertNotEqual(p["data_quality"], "price_only")
+        tmp = self.tmp_dir()
+        cfg = Top100Config(universe_size=14, db_path=os.path.join(tmp, "t.db"),
+                           cache_dir=os.path.join(tmp, "c"), max_ohlcv_per_cycle=14,
+                           min_score=55)
+        eng = Top100MarketEngine(cfg=cfg, provider=MockDataProvider(n=14),
+                                 store=self.open_store(cfg.db_path))
+        out = eng.run_once()
+        self.assertIsNotNone(eng.paper)
+        self.assertTrue(out["sent"], "نحتاج إشارات لاختبار المسار الورقي")
+        self.assertTrue(eng.paper.open_positions(), "كل إشارة تفتح مركزاً ورقياً")
+        self.assertIsNotNone(out["paper_stats"])
+        self.assertTrue(eng.paper.equity_curve(), "منحنى رأس المال يُسجَّل يومياً")
+        for p in eng.paper.open_positions():
+            self.assertNotEqual(p["data_quality"], "price_only")
 
 
 if __name__ == "__main__":
