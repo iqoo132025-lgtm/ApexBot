@@ -41,6 +41,9 @@ jobs:
       - name: Non-UTF-8 stdout regression test
         run: python -m apex_top100.tests.test_stdout_encoding
 
+      - name: Single-instance lock tests
+        run: python -m apex_top100.tests.test_instance_lock
+
       - name: Fail if credentials are hardcoded
         run: |
           if grep -rInE '(API_KEY|SECRET_KEY|api_key|api_secret)[^=:]*[:=][[:space:]]*["'"'"'][A-Za-z0-9]{20,}["'"'"']' --include='*.py' .; then
