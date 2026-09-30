@@ -35,29 +35,31 @@ def make_signal(symbol="SOL", price=100.0, **kw) -> Top100Signal:
     return Top100Signal(**base)
 
 
-def broker(**cfg) -> PaperBroker:
+def broker(case: unittest.TestCase, **cfg) -> PaperBroker:
+    """وسيط على قاعدة :memory: يُغلق اتصالها بنهاية الاختبار."""
     conn = sqlite3.connect(":memory:")
+    case.addCleanup(conn.close)
     conn.row_factory = sqlite3.Row
     return PaperBroker(conn, PaperConfig(slippage_pct=0.0, **cfg))
 
 
 class TestPaperLifecycle(unittest.TestCase):
     def test_opens_at_market_inside_entry_zone(self):
-        b = broker()
+        b = broker(self)
         self.assertIsNotNone(b.open_from_signal(make_signal(price=100.0)))
         pos = b.open_positions()[0]
         self.assertEqual(pos["status"], "OPEN")
         self.assertAlmostEqual(pos["entry"], 100.0, places=4)
 
     def test_pending_when_price_above_zone(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=120.0))
         self.assertEqual(b.open_positions()[0]["status"], "PENDING")
         b.update({"sol": 100.0})                      # رجع إلى المنطقة
         self.assertEqual(b.open_positions()[0]["status"], "OPEN")
 
     def test_pending_expires_when_invalidation_breaks_first(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=120.0))
         b.update({"sol": 85.0})                       # كسر الإبطال قبل الدخول
         self.assertEqual(b.open_positions(), [])
@@ -65,7 +67,7 @@ class TestPaperLifecycle(unittest.TestCase):
         self.assertEqual(row["status"], "EXPIRED")
 
     def test_stop_loss_is_minus_one_r(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))  # مخاطرة 10 نقاط
         b.update({"sol": 90.0})
         closed = b.closed_positions()[0]
@@ -73,7 +75,7 @@ class TestPaperLifecycle(unittest.TestCase):
         self.assertAlmostEqual(closed["realized_r"], -1.0, places=2)
 
     def test_partial_exits_and_breakeven_stop(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         b.update({"sol": 111.0})                      # TP1
         pos = b.open_positions()[0]
@@ -86,7 +88,7 @@ class TestPaperLifecycle(unittest.TestCase):
         self.assertAlmostEqual(closed["realized_r"], 0.4, places=2)
 
     def test_all_targets_close_position(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         b.update({"sol": 145.0})                      # الأهداف الثلاثة دفعة واحدة
         closed = b.closed_positions()[0]
@@ -96,14 +98,14 @@ class TestPaperLifecycle(unittest.TestCase):
         self.assertEqual(b.open_positions(), [])
 
     def test_max_hold_exit(self):
-        b = broker(max_hold_days=10)
+        b = broker(self, max_hold_days=10)
         b.open_from_signal(make_signal(price=100.0))
         b.conn.execute("UPDATE paper_positions SET opened_at=?", (int(time.time()) - 11 * 86400,))
         b.update({"sol": 104.0})
         self.assertEqual(b.closed_positions()[0]["exit_reason"], "max_hold")
 
     def test_mfe_and_mae_tracked(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         b.update({"sol": 108.0})
         b.update({"sol": 94.0})
@@ -112,13 +114,13 @@ class TestPaperLifecycle(unittest.TestCase):
         self.assertAlmostEqual(pos["mae_pct"], -6.0, places=1)
 
     def test_price_only_signal_never_enters(self):
-        b = broker()
+        b = broker(self)
         self.assertIsNone(b.open_from_signal(make_signal(data_quality="price_only")))
         self.assertIsNone(b.open_from_signal(make_signal(tradable=False)))
         self.assertEqual(b.open_positions(), [])
 
     def test_no_duplicate_position_per_coin(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         b.open_from_signal(make_signal(price=100.0))
         self.assertEqual(len(b.open_positions()), 1)
@@ -141,7 +143,7 @@ class TestCandleExecution(TmpDbTestCase):
         الحالة التي كشفها المراجع: SOL عند 100، بين دورتين هبط إلى 89 فضرب الوقف 90
         ثم ارتد إلى 111. لقطة السعر ترى 111 فتحتسب TP1؛ الشمعة ترى الوقف.
         """
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         events = b.apply_candles({"sol": self.bars((1, 100.0, 111.0, 89.0, 111.0))})
         closed = b.closed_positions()[0]
@@ -151,14 +153,14 @@ class TestCandleExecution(TmpDbTestCase):
         self.assertNotIn("tp1", closed["hits"])
 
         # للمقارنة: اللقطة وحدها كانت ستعطي نتيجة معاكسة
-        b2 = broker()
+        b2 = broker(self)
         b2.open_from_signal(make_signal(price=100.0))
         b2.update({"sol": 111.0})
         self.assertIn("tp1", b2.open_positions()[0]["hits"])
 
     def test_tp_and_stop_in_same_candle_assumes_stop_first(self):
         """الغموض: الشمعة لمست الأهداف الثلاثة والوقف. الافتراض المحافظ = الوقف أولاً."""
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         b.apply_candles({"sol": self.bars((1, 100.0, 145.0, 89.0, 120.0))})
         closed = b.closed_positions()[0]
@@ -168,7 +170,7 @@ class TestCandleExecution(TmpDbTestCase):
 
     def test_target_alone_in_candle_is_booked(self):
         """ضبط مقابل الاختبار السابق: بلا لمس الوقف تُحتسب الأهداف من High."""
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         b.apply_candles({"sol": self.bars((1, 101.0, 126.0, 100.5, 120.0))})
         pos = b.open_positions()[0]
@@ -178,7 +180,7 @@ class TestCandleExecution(TmpDbTestCase):
 
     def test_gap_down_through_stop_exits_at_open_not_at_stop(self):
         """فجوة تفتح تحت الوقف: الخروج عند الافتتاح — خسارة أسوأ من 1R، وهذا هو الواقع."""
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         b.apply_candles({"sol": self.bars((1, 80.0, 95.0, 78.0, 94.0))})
         closed = b.closed_positions()[0]
@@ -187,7 +189,7 @@ class TestCandleExecution(TmpDbTestCase):
 
     def test_gap_up_books_at_target_price_then_breakeven_stop(self):
         """فتحت فوق TP1: يُحتسب عند سعر الهدف لا عند الافتتاح الأعلى، ثم الوقف للتعادل."""
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         b.apply_candles({"sol": self.bars((1, 115.0, 115.0, 89.0, 92.0))})
         closed = b.closed_positions()[0]
@@ -196,7 +198,7 @@ class TestCandleExecution(TmpDbTestCase):
         self.assertAlmostEqual(closed["realized_r"], 0.4, places=2)
 
     def test_mfe_and_mae_come_from_high_and_low(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         b.apply_candles({"sol": self.bars((1, 100.0, 108.0, 94.0, 100.0))})
         pos = b.open_positions()[0]
@@ -204,7 +206,7 @@ class TestCandleExecution(TmpDbTestCase):
         self.assertAlmostEqual(pos["mae_pct"], -6.0, places=1)
 
     def test_stopped_candle_does_not_credit_its_high_as_mfe(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         b.apply_candles({"sol": self.bars((1, 100.0, 140.0, 89.0, 100.0))})
         closed = b.closed_positions()[0]
@@ -213,7 +215,7 @@ class TestCandleExecution(TmpDbTestCase):
 
     def test_pending_fills_intrabar_then_stops_in_same_candle(self):
         """الشمعة نزلت من 120 إلى 89: الدخول عند حد المنطقة ثم الوقف — لا خروج بلا خسارة."""
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=120.0))
         events = b.apply_candles({"sol": self.bars((1, 120.0, 121.0, 89.0, 95.0))})
         self.assertEqual([e["event"] for e in events], ["FILLED", "CLOSED"])
@@ -222,7 +224,7 @@ class TestCandleExecution(TmpDbTestCase):
         self.assertAlmostEqual(closed["realized_r"], -1.0, places=2)
 
     def test_bars_are_not_replayed_but_forming_bar_updates(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         forming = self.bars((1, 100.0, 105.0, 98.0, 104.0))
         self.assertEqual(b.apply_candles({"sol": forming}), [])
@@ -235,7 +237,7 @@ class TestCandleExecution(TmpDbTestCase):
         self.assertAlmostEqual(b.closed_positions()[0]["realized_r"], 0.4, places=2)
 
     def test_candles_before_the_signal_are_ignored(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         t0 = int(time.time())
         past = [Bar(t0 - 3 * 86400, 100.0, 105.0, 80.0, 82.0)]    # هبوط سابق للإشارة
@@ -243,7 +245,7 @@ class TestCandleExecution(TmpDbTestCase):
         self.assertEqual(b.open_positions()[0]["status"], "OPEN")
 
     def test_multi_bar_sequence_stops_at_the_right_bar(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal(price=100.0))
         b.apply_candles({"sol": self.bars(
             (1, 100.0, 104.0, 99.0, 103.0),
@@ -281,7 +283,7 @@ class TestCandleExecution(TmpDbTestCase):
 
 class TestPaperStats(unittest.TestCase):
     def test_stats_and_report(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("SOL", price=100.0))
         b.update({"sol": 145.0})                      # رابحة
         b.open_from_signal(make_signal("ADA", price=100.0))
@@ -317,7 +319,7 @@ class TestDrawdownAndExcursions(unittest.TestCase):
         b.update({symbol.lower(): 145.0})             # فوق TP3
 
     def test_curve_last_point_matches_equity(self):
-        b = broker()
+        b = broker(self)
         self._winner(b, "SOL")
         self._loser(b, "ADA")
         curve = b.realized_equity_curve()
@@ -325,7 +327,7 @@ class TestDrawdownAndExcursions(unittest.TestCase):
         self.assertAlmostEqual(curve[-1]["equity"], b.equity(), places=2)
 
     def test_drawdown_compounds_over_consecutive_losses(self):
-        one, two = broker(), broker()
+        one, two = broker(self), broker(self)
         self._loser(one, "SOL")
         self._loser(two, "SOL")
         self._loser(two, "ADA")
@@ -337,14 +339,14 @@ class TestDrawdownAndExcursions(unittest.TestCase):
         self.assertAlmostEqual(dd2, compounded, delta=0.02)
 
     def test_peak_before_any_win_is_the_start_equity(self):
-        b = broker()
+        b = broker(self)
         self._loser(b, "SOL")
         dd = b.max_drawdown()
         self.assertEqual(dd["dd_from"], b.cfg.start_equity)
         self.assertLess(dd["dd_to"], b.cfg.start_equity)
 
     def test_drawdown_measured_from_the_peak_not_from_the_start(self):
-        b = broker()
+        b = broker(self)
         self._winner(b, "SOL")
         self._loser(b, "ADA")
         dd = b.max_drawdown()
@@ -357,7 +359,7 @@ class TestDrawdownAndExcursions(unittest.TestCase):
         `equity()` لا يحتسب المراكز المفتوحة، فالتراجع المقيس تحفّظي:
         مركز هابط لم يُغلق بعد يظهر في MAE لا في أقصى التراجع.
         """
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("SOL", price=100.0))
         b.apply_candles({"sol": self.bars((1, 100.0, 101.0, 91.0, 92.0))})
         pos = b.open_positions()[0]
@@ -365,7 +367,7 @@ class TestDrawdownAndExcursions(unittest.TestCase):
         self.assertEqual(b.max_drawdown()["max_dd_pct"], 0.0)
 
     def test_stats_carry_mfe_and_mae(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("SOL", price=100.0))
         b.apply_candles({"sol": self.bars((1, 100.0, 108.0, 99.0, 106.0),
                                           (2, 106.0, 106.0, 89.0, 90.0))})
@@ -381,7 +383,7 @@ class TestDrawdownAndExcursions(unittest.TestCase):
         الشمعة التي تضرب الوقف وترتفع: السياسة تفترض الوقف أولاً، فالارتفاع
         بعده حركة لمركز مُغلق ولا يُحتسب MFE. تثبيت هذا يمنع تجميل الأرقام.
         """
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("SOL", price=100.0))
         b.apply_candles({"sol": self.bars((1, 100.0, 108.0, 89.0, 95.0))})
         s = b.stats()
@@ -390,7 +392,7 @@ class TestDrawdownAndExcursions(unittest.TestCase):
         self.assertAlmostEqual(s["avg_mae_pct"], -11.0, delta=0.1)
 
     def test_report_prints_the_new_metrics(self):
-        b = broker()
+        b = broker(self)
         self._winner(b, "SOL")
         self._loser(b, "ADA")
         text = b.report()
@@ -399,7 +401,7 @@ class TestDrawdownAndExcursions(unittest.TestCase):
 
     def test_report_shows_open_excursions_before_any_close(self):
         """أول تقرير في الاختبار يأتي وما أُغلقت صفقة بعد — لا يصح أن يكون فارغاً."""
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("SOL", price=100.0))
         b.apply_candles({"sol": self.bars((1, 100.0, 106.0, 95.0, 104.0))})
         text = b.report()
@@ -415,7 +417,7 @@ class TestPositionDisplay(unittest.TestCase):
     """
 
     def test_pending_is_not_called_open_and_shows_no_fill_price(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("ZEC", price=120.0))   # فوق المنطقة
         pos = b.open_positions()[0]
         self.assertEqual(pos["status"], "PENDING")
@@ -428,7 +430,7 @@ class TestPositionDisplay(unittest.TestCase):
         self.assertNotIn("@", line)
 
     def test_open_line_shows_the_actual_entry(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("MORPHO", price=100.0))
         pos = b.open_positions()[0]
         self.assertEqual(pos["status"], "OPEN")
@@ -439,7 +441,7 @@ class TestPositionDisplay(unittest.TestCase):
 
     def test_open_line_never_falls_back_to_entry_high_when_entry_exists(self):
         """`entry` الحقيقي هو المعروض، لا سقف المنطقة."""
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("SOL", price=99.0, entry_high=101.0))
         pos = b.open_positions()[0]
         self.assertIn("99.0000", format_position_line(pos))
@@ -447,7 +449,7 @@ class TestPositionDisplay(unittest.TestCase):
 
     def test_report_does_not_print_zero_excursions_for_a_pending_order(self):
         """صفر MFE/MAE لأمر لم يدخل ليس قياساً، فلا يُعرض كأنه قياس."""
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("ZEC", price=120.0))
         text = b.report()
         self.assertIn("لم يدخل بعد", text)
@@ -455,7 +457,7 @@ class TestPositionDisplay(unittest.TestCase):
 
     def test_report_counts_filled_and_pending_separately(self):
         """«9 مراكز» لا تعني 9 صفقات منفَّذة، فلا يجمعهما عدّاد واحد."""
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("MORPHO", price=100.0))     # منفَّذ
         b.open_from_signal(make_signal("ZEC", price=120.0))        # معلّق
         b.open_from_signal(make_signal("UNI", price=130.0))        # معلّق
@@ -465,7 +467,7 @@ class TestPositionDisplay(unittest.TestCase):
         self.assertNotIn("مراكز مفتوحة: 3", text)
 
     def test_closed_report_also_separates_filled_from_pending(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("SOL", price=100.0))
         b.update({"sol": 145.0})                                   # صفقة مغلقة
         b.open_from_signal(make_signal("ZEC", price=120.0))        # معلّق
@@ -475,7 +477,7 @@ class TestPositionDisplay(unittest.TestCase):
         self.assertIn("أوامر معلّقة: 1", text)
 
     def test_report_still_prints_excursions_for_a_filled_position(self):
-        b = broker()
+        b = broker(self)
         b.open_from_signal(make_signal("MORPHO", price=100.0))
         b.apply_candles({"morpho": [Bar(int(time.time()) + 86400, 100.0, 106.0, 95.0, 104.0)]})
         text = b.report()
