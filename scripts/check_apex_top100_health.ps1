@@ -23,7 +23,9 @@ param(
     [string]$LogDir       = 'C:\Users\JASSIM\ApexBot\logs',
     [string]$TaskName     = 'APEX-Top100-Production',
     [string]$LoopPattern  = 'run_top100.py',
-    [int]   $MaxAgeMinutes = 35    # scan interval is 15 min: two missed cycles + margin
+    [int]   $MaxAgeMinutes = 35,   # scan interval is 15 min: two missed cycles + margin
+    [string]$DashboardTaskName = 'APEX-Dashboard',
+    [int]   $DashboardPort = 8765
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,10 +104,26 @@ $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($task) {
     $ti = Get-ScheduledTaskInfo -TaskName $TaskName
     Show 'task' ('{0}: {1}' -f $TaskName, $task.State)
-    Show 'task last run' ('{0} result=0x{1:X}' -f $ti.LastRunTime, $ti.LastTaskResult)
+    # Hex as text: in Windows PowerShell 5.1 the literal 0x800710E0 is a negative Int32
+    $hex = '{0:X}' -f $ti.LastTaskResult
+    $meaning = switch ($hex) {
+        '0'        { 'last run finished' }
+        '41301'    { 'running now' }
+        '41303'    { 'has not run yet' }
+        '41325'    { 'queued' }
+        '800710E0' { 'tick skipped: the loop was already running (IgnoreNew) - expected' }
+        default    { 'see Task Scheduler history' }
+    }
+    Show 'task last run' ('{0} result=0x{1} ({2})' -f $ti.LastRunTime, $hex, $meaning)
     Show 'task next run' $ti.NextRunTime
     if ($task.State -eq 'Disabled') { $problems.Add('scheduled task is disabled') }
 } else { Show 'task' "$TaskName not registered"; $problems.Add('scheduled task missing') }
+
+# --- dashboard (informational; never affects the verdict) --------------------
+$dashTask = Get-ScheduledTask -TaskName $DashboardTaskName -ErrorAction SilentlyContinue
+$dashUp = [bool](Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $DashboardPort -State Listen -ErrorAction SilentlyContinue)
+Show 'dashboard' ('{0} on 127.0.0.1:{1}; task {2}' -f $(if ($dashUp) { 'listening' } else { 'not listening' }), $DashboardPort,
+                  $(if ($dashTask) { $dashTask.State } else { 'not registered' }))
 
 # --- auto_execute (effective default used by run_top100.py) ------------------
 try {

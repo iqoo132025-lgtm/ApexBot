@@ -25,6 +25,17 @@ py -u run_dashboard.py
 (افتراضياً `8765`). الخادم يستمع على `127.0.0.1` فقط ما لم يُمرَّر `--host` صراحةً، ولا مصادقة فيه — لا تكشفه على الشبكة.
 للإيقاف: `Ctrl+C` في نافذته.
 
+### تشغيل تلقائي (اختياري)
+
+```powershell
+# PowerShell بصلاحية مسؤول — مهمة مستقلة عن APEX-Top100-Production
+powershell -ExecutionPolicy Bypass -File scripts\install_apex_dashboard_task.ps1
+```
+
+مهمة `APEX-Dashboard`: عند الإقلاع ثم محاولة كل 5 دقائق، `IgnoreNew`، حساب المستخدم بنمط S4U (بلا كلمة مرور
+ولا نافذة)، على `127.0.0.1:8765`. تثبيتها أو تشغيلها أو إيقافها لا يمسّ حلقة الإنتاج ولا قفلها. فحص الصحة يعرض حالتها
+للعلم فقط. للإيقاف: `Stop-ScheduledTask -TaskName APEX-Dashboard`، وللإزالة: `Unregister-ScheduledTask -TaskName APEX-Dashboard`.
+
 ## ضمانات القراءة فقط
 
 | ماذا | كيف |
