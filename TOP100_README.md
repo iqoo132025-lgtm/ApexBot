@@ -388,6 +388,8 @@ powershell -ExecutionPolicy Bypass -File scripts\check_apex_top100_health.ps1
   فوقه: `IgnoreNew` في المهمة و mutex في الغلاف `scripts\run_apex_top100_production.ps1`.
 - **السجلات:** `logs\top100-<بدء>.log` و `.err.log` لكل تشغيل، و `logs\supervisor.log` لأحداث
   البدء والخروج. لا يُحذف شيء تلقائياً (نحو 50 KB يومياً).
+- **نتيجة المهمة:** فحص الصحة يشرح الكود؛ `0x800710E0` يعني أن tick تُجوهل لأن الحلقة تعمل (`IgnoreNew`) — متوقع.
+- **تقرير Forward Test:** `py run_top100.py --paper-report` للقراءة فقط (`mode=ro`، بلا `CREATE TABLE`، ولا ينشئ قاعدة غير موجودة).
 - **الإيقاف:** `Stop-ScheduledTask` ينهي الغلاف فقط، وتبقى بايثون تعمل وتمسك القفل.
   للإيقاف الكامل: عطّل المهمة ثم أوقف عملية `python.exe` التي يذكرها فحص الصحة،
   ويُفضّل أثناء النوم بين الدورات (بعد سطر «تقرير بيانات الدورة» بدقيقة).

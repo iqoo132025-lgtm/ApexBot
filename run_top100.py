@@ -11,7 +11,9 @@
 """
 import argparse
 import os
+import sqlite3
 import sys
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -24,8 +26,43 @@ for _stream in (sys.stdout, sys.stderr):
 
 from apex_top100.config import Top100Config
 from apex_top100.integration import ApexV2Bridge, build_engine
-from apex_top100.paper import format_position_line
+from apex_top100.paper import PaperBroker, PaperConfig, format_position_line
 from apex_top100.telegram_signals import format_top100_signal
+
+
+def paper_report(cfg: Top100Config) -> int:
+    """
+    تقرير Forward Test للقراءة فقط: اتصال `mode=ro` فلا يكتب SQLite شيئاً، وبلا
+    `PaperBroker.__init__` (ينفّذ CREATE TABLE) ولا محرك ولا مزوّد بيانات.
+    قاعدة غير موجودة لا تُنشأ.
+    """
+    if not cfg.paper_trading:
+        print("Paper Trading معطّل في الإعدادات")
+        return 1
+    db = os.path.abspath(cfg.db_path)
+    if not os.path.isfile(db):
+        print(f"لا قاعدة بيانات في {db} — لا تقرير", file=sys.stderr)
+        return 1
+    path = db.replace("\\", "/")
+    uri = "file:" + urllib.parse.quote(path if path.startswith("/") else "/" + path, safe="/:") + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=5)
+    try:
+        conn.row_factory = sqlite3.Row
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='paper_positions'").fetchone():
+            print("لا مراكز ورقية بعد — Forward Test لم يبدأ في هذه القاعدة")
+            return 0
+        b = PaperBroker.__new__(PaperBroker)
+        b.conn = conn
+        b.cfg = PaperConfig(start_equity=cfg.paper_start_equity,
+                            entry_expiry_days=cfg.paper_entry_expiry_days,
+                            max_hold_days=cfg.paper_max_hold_days,
+                            slippage_pct=cfg.paper_slippage_pct)
+        print(b.report())
+        for p in b.open_positions()[:10]:
+            print("  " + format_position_line(p))
+    finally:
+        conn.close()
+    return 0
 
 
 def main() -> int:
@@ -64,16 +101,10 @@ def main() -> int:
         cfg.db_path = "apex_top100_demo.db"
         provider = MockDataProvider(n=cfg.universe_size)
 
-    engine = build_engine(cfg, bridge=ApexV2Bridge(), provider=provider)
+    if args.paper_report:            # قبل build_engine: لا CREATE ولا مزوّد ولا كتابة
+        return paper_report(cfg)
 
-    if args.paper_report:
-        if not engine.paper:
-            print("Paper Trading معطّل في الإعدادات")
-            return 1
-        print(engine.paper.report())
-        for p in engine.paper.open_positions()[:10]:
-            print("  " + format_position_line(p))
-        return 0
+    engine = build_engine(cfg, bridge=ApexV2Bridge(), provider=provider)
 
     if args.demo:
         from datetime import date, timedelta

@@ -14,6 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, ROOT)
 
 from apex_top100.instance_lock import ALREADY_RUNNING_EXIT, InstanceLock, lock_path_for
+from apex_top100.paper import PaperBroker, PaperConfig
 from apex_top100.tests.tmpdb import TmpDbTestCase
 
 PROD_DB = os.path.join(ROOT, "apex_top100.db")
@@ -122,6 +123,9 @@ class TestInstanceLock(TmpDbTestCase):
         self.assertFalse(os.path.exists(self.db), "الحلقة الثانية لا تفتح قاعدة البيانات")
 
     def test_paper_report_is_not_blocked_by_a_running_loop(self):
+        store = self.open_store(self.db)          # التقرير للقراءة فقط ولا يُنشئ القاعدة
+        PaperBroker(store.conn, PaperConfig())
+        store.close()
         self._holder()
         r = self._run_top100("--paper-report")
         self.assertEqual(r.returncode, 0, r.stderr.decode("utf-8", "replace"))
