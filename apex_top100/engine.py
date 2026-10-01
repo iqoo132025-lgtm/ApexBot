@@ -135,6 +135,35 @@ class Top100MarketEngine:
             return set()
         return {p["coin_id"] for p in self.paper.open_positions()}
 
+    def held_outside_universe(self) -> List[CoinInfo]:
+        """
+        مراكز قائمة (OPEN/PENDING) خرجت عملتها من الكون القابل للإشارة: تُدار ولا تُكتشف.
+
+        بدونها يسقط المركز صامتاً من `cycle_coins` لأن العملة لم تعد في `signalable_universe()`،
+        فلا تُسحب شموعه ولا يُفحص وقفه ولا أهدافه ولا تنتهي نافذة دخوله — صف ميت (PYTH خرج من
+        Top 100 في 2026-09-30 وهو PENDING فبقي مجمّداً).
+
+        `CoinInfo` هنا للإدارة فقط: يحمل ما يحتاجه `fetch_ohlcv` (الرمز والزوج) ولا يدخل
+        `self.universe` أبداً، فلا لقطة ولا rank_history ولا اتساع سوق ولا تحليل ولا إشارة.
+        الترتيب 0 وبقية الحقول أصفار لأنها غير معروفة، لا لأنها قيم حقيقية.
+        """
+        if not self.paper:
+            return []
+        inside = {c.coin_id for c in self.signalable_universe()}
+        out: List[CoinInfo] = []
+        seen = set()
+        for p in self.paper.open_positions():
+            cid = p["coin_id"]
+            if cid in inside or cid in seen:
+                continue
+            seen.add(cid)
+            out.append(CoinInfo(coin_id=cid, symbol=p["symbol"], name=p["symbol"], rank=0,
+                                price=0.0, market_cap=0.0, volume_24h=0.0))
+        if out:
+            self.hooks.log(f"{len(out)} مركزاً قائماً خارج Top 100 الحالي — تُسحب شموعه للإدارة فقط: "
+                           + ", ".join(c.symbol for c in out))
+        return out
+
     def _priority_order(self) -> List[CoinInfo]:
         """
         أولوية السحب: المركز القائم، ثم الداخل الجديد، ثم صاعدو الترتيب، ثم الأعلى ترتيباً.
@@ -165,13 +194,26 @@ class Top100MarketEngine:
         """
         ordered = self._priority_order()
         held = self.held_coin_ids()
-        held_coins = [c for c in ordered if c.coin_id in held]
+        held_coins = [c for c in ordered if c.coin_id in held] + self.held_outside_universe()
         room = max(0, self.cfg.max_ohlcv_per_cycle - len(held_coins))
         if not room:
             self.hooks.log(f"{len(held_coins)} مركزاً قائماً يستوعب ميزانية الشموع "
                            f"({self.cfg.max_ohlcv_per_cycle}) كاملةً — تُسحب شموعها جميعاً "
                            f"ولا اكتشاف جديد هذه الدورة", "warn")
         return held_coins + [c for c in ordered if c.coin_id not in held][:room]
+
+    def warn_unmanaged(self, loaded: Dict[str, OHLCV]) -> List[str]:
+        """
+        مراكز قائمة لم تصلها شموع إدارة هذه الدورة (لا زوج Binance أو تعذّر السحب).
+        لا شموع مصطنعة: المركز يبقى كما هو ويُقال ذلك صراحةً بدل أن يتجمّد بصمت.
+        """
+        if not self.paper:
+            return []
+        missing = sorted({p["symbol"] for p in self.paper.open_positions() if p["coin_id"] not in loaded})
+        if missing:
+            self.hooks.log(f"{len(missing)} مركزاً قائماً بلا شموع إدارة هذه الدورة "
+                           f"(لا زوج Binance أو تعذّر السحب): {', '.join(missing)}", "warn")
+        return missing
 
     def load_ohlcv(self, coins: List[CoinInfo]) -> Dict[str, OHLCV]:
         out: Dict[str, OHLCV] = {}
@@ -351,7 +393,8 @@ class Top100MarketEngine:
             c = self._coin(sym)
             if c and c not in coins:
                 coins.append(c)
-        self.load_ohlcv(coins)
+        loaded = self.load_ohlcv(coins)
+        self.warn_unmanaged(loaded)
         self.update_regime()
         sigs = self.analyze_all()
         sent = self.emit(sigs)

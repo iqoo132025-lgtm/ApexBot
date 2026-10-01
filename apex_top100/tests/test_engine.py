@@ -6,6 +6,7 @@
 import os
 import sys
 import tempfile
+import time
 import unittest
 from datetime import date, timedelta
 
@@ -422,6 +423,157 @@ class TestHeldPositionsKeepTheirCandles(TmpDbTestCase):
         eng.run_once()
         warns = [m for lvl, m in eng.hooks.logs if lvl == "warn" and "ميزانية الشموع" in m]
         self.assertFalse(warns)
+
+
+class TestHeldPositionsOutsideTheUniverse(TmpDbTestCase):
+    """
+    مركز قائم خرجت عملته من Top 100 يبقى يُدار. PYTH في الإنتاج: PENDING منذ 2026-09-27،
+    خرج من Top 100 في 09-30، فلم تُسحب شموعه لأن `cycle_coins` كان يختار المراكز القائمة من
+    الكون الحالي فقط — بلا انتهاء نافذة ولا تنفيذ لأكثر من 100 ساعة.
+    الإدارة لا تعني الاكتشاف: العملة لا تعود إلى الكون ولا اللقطة ولا اتساع السوق ولا الإشارات.
+    """
+
+    def _engine(self, n=14, budget=5):
+        tmp = self.tmp_dir()
+        cfg = Top100Config(universe_size=n, db_path=os.path.join(tmp, "t.db"),
+                           cache_dir=os.path.join(tmp, "cache"),
+                           max_ohlcv_per_cycle=budget, min_score=60)
+        eng = Top100MarketEngine(cfg=cfg, provider=MockDataProvider(n=n),
+                                 store=self.open_store(cfg.db_path), hooks=QuietHooks())
+        eng.refresh_universe(force=True)
+        return eng
+
+    @staticmethod
+    def _signal(coin, pending=False, **kw):
+        p = coin.price
+        base = dict(price=p * 1.30 if pending else p, rank=coin.rank,
+                    entry_low=p * 0.98, entry_high=p * 1.02, invalidation=p * 0.90,
+                    tp1=p * 1.2, tp2=p * 1.4, tp3=p * 1.6)
+        base.update(kw)
+        return make_signal(base.pop("symbol", coin.symbol), **base)
+
+    @staticmethod
+    def _leave_universe(eng, coin):
+        """العملة تخرج من Top 100 — والكون لا يُعاد سحبه في هذه الدورة."""
+        eng.universe = [c for c in eng.universe if c.coin_id != coin.coin_id]
+        eng.last_universe_refresh = time.time()
+
+    @staticmethod
+    def _backdate(eng, coin_id, days, opened=False):
+        """المركز أُنشئ قبل `days` يوماً (قاعدة الاختبار المؤقتة فقط)."""
+        t = int(time.time()) - days * 86400
+        eng.store.conn.execute(
+            "UPDATE paper_positions SET signaled_at=?, last_bar_ts=?"
+            + (", opened_at=?" if opened else "") + " WHERE coin_id=?",
+            (t, t, t, coin_id) if opened else (t, t, coin_id))
+        eng.store.conn.commit()
+
+    def _row(self, eng, coin_id):
+        return dict(eng.store.conn.execute(
+            "SELECT * FROM paper_positions WHERE coin_id=?", (coin_id,)).fetchone())
+
+    def test_pending_outside_the_universe_still_gets_candles_and_expires_normally(self):
+        eng = self._engine()
+        coin = sorted(eng.signalable_universe(), key=lambda c: c.rank)[-1]
+        # منطقة دخول تحت كل الأسعار والإبطال تحتها: لا تنفيذ ولا فجوة، فلا يبقى إلا قاعدة النافذة
+        eng.paper.open_from_signal(self._signal(coin, pending=True, entry_low=coin.price * 0.004,
+                                                entry_high=coin.price * 0.005,
+                                                invalidation=coin.price * 0.001))
+        self._backdate(eng, coin.coin_id, days=5)
+        before = self._row(eng, coin.coin_id)
+        self.assertEqual(before["status"], "PENDING")
+        self._leave_universe(eng, coin)
+        self.assertIn(coin.coin_id, [c.coin_id for c in eng.cycle_coins()])
+        eng.run_once()
+        after = self._row(eng, coin.coin_id)
+        self.assertIn(coin.coin_id, eng.ohlcv_cache, "شموع الإدارة تُسحب رغم الخروج من الكون")
+        self.assertGreater(after["last_bar_ts"], before["last_bar_ts"])
+        # السعر بقي فوق المنطقة 5 أيام → قاعدة الانتهاء الحالية (3 أيام) لا غير
+        self.assertEqual(after["status"], "EXPIRED")
+        self.assertEqual(after["exit_reason"], "entry_window_expired")
+
+    def test_open_outside_the_universe_is_managed_through_max_hold(self):
+        eng = self._engine()
+        coin = sorted(eng.signalable_universe(), key=lambda c: c.rank)[-1]
+        # أهداف ووقف بعيدة جداً: لا يبقى إلا قاعدة المدة القصوى الحالية (45 يوماً)
+        eng.paper.open_from_signal(self._signal(coin, invalidation=coin.price * 0.01,
+                                                tp1=coin.price * 100, tp2=coin.price * 200,
+                                                tp3=coin.price * 300))
+        self.assertEqual(self._row(eng, coin.coin_id)["status"], "OPEN")
+        self._backdate(eng, coin.coin_id, days=50, opened=True)
+        self._leave_universe(eng, coin)
+        eng.run_once()
+        after = self._row(eng, coin.coin_id)
+        self.assertEqual(after["status"], "CLOSED")
+        self.assertEqual(after["exit_reason"], "max_hold")
+        self.assertNotEqual(after["mfe_pct"], 0.0, "MFE/MAE تتحرك من شموع حقيقية")
+
+    def test_open_outside_the_universe_still_hits_its_stop(self):
+        eng = self._engine()
+        coin = sorted(eng.signalable_universe(), key=lambda c: c.rank)[-1]
+        # وقف فوق كل الأسعار تقريباً → أول شمعة بعد الدخول تضربه بالقاعدة الحالية
+        eng.paper.open_from_signal(self._signal(coin))
+        eng.store.conn.execute("UPDATE paper_positions SET stop=?, invalidation=? WHERE coin_id=?",
+                               (coin.price * 10, coin.price * 10, coin.coin_id))
+        eng.store.conn.commit()
+        self._backdate(eng, coin.coin_id, days=3, opened=True)
+        self._leave_universe(eng, coin)
+        eng.run_once()
+        self.assertEqual(self._row(eng, coin.coin_id)["status"], "CLOSED")
+
+    def test_held_outside_coins_come_before_the_discovery_budget(self):
+        eng = self._engine(budget=2)
+        gone = sorted(eng.signalable_universe(), key=lambda c: c.rank)[-3:]
+        for c in gone:
+            eng.paper.open_from_signal(self._signal(c, pending=True))
+        for c in gone:
+            self._leave_universe(eng, c)
+        picked = [c.coin_id for c in eng.cycle_coins()]
+        self.assertEqual(sorted(picked), sorted(c.coin_id for c in gone),
+                         "كل المراكز تُسحب، والميزانية سقف على الاكتشاف فقط")
+        self.assertTrue(any(lvl == "warn" and "ميزانية الشموع" in m for lvl, m in eng.hooks.logs))
+
+    def test_management_does_not_leak_into_universe_snapshot_regime_or_signals(self):
+        eng = self._engine()
+        coin = sorted(eng.signalable_universe(), key=lambda c: c.rank)[-1]
+        eng.paper.open_from_signal(self._signal(coin, pending=True))
+        self._leave_universe(eng, coin)
+        size = len(eng.universe)
+        out = eng.run_once()
+        self.assertIn(coin.coin_id, eng.ohlcv_cache)
+        self.assertEqual(len(eng.universe), size, "لا يُعاد إلى الكون")
+        self.assertNotIn(coin.coin_id, [c.coin_id for c in eng.universe])
+        snap = eng.store.snapshot(eng.store.last_snapshot_date())
+        self.assertNotIn(coin.coin_id, snap, "لا يدخل rank_history ولا عدد Top 100")
+        self.assertNotIn(coin.symbol, [s.symbol for s in out["signals"]], "لا يُحلَّل للاكتشاف")
+        self.assertEqual(eng.store.conn.execute(
+            "SELECT COUNT(*) FROM signals WHERE coin_id=?", (coin.coin_id,)).fetchone()[0], 0,
+            "لا إشارة جديدة لمجرد أنه مركز قائم")
+        with_held = eng.update_regime()
+        del eng.ohlcv_cache[coin.coin_id]
+        eng.store.conn.execute("DELETE FROM regime_history")   # نفس نقطة البداية للمقارنة
+        without = eng.update_regime()
+        self.assertEqual(with_held.score, without.score, "لا أثر على اتساع السوق")
+        self.assertEqual(with_held.metrics.get("breadth"), without.metrics.get("breadth"))
+
+    def test_a_held_coin_without_a_binance_pair_is_reported_not_faked(self):
+        eng = self._engine()
+        ref = sorted(eng.signalable_universe(), key=lambda c: c.rank)[-1]
+        eng.paper.open_from_signal(self._signal(ref, pending=True, symbol="NOPAIR", coin_id="nopair"))
+        before = self._row(eng, "nopair")
+        eng.run_once()                                       # لا استثناء
+        after = self._row(eng, "nopair")
+        self.assertNotIn("nopair", eng.ohlcv_cache, "لا شموع مصطنعة")
+        self.assertEqual((after["status"], after["last_bar_ts"]), (before["status"], before["last_bar_ts"]))
+        warns = [m for lvl, m in eng.hooks.logs if lvl == "warn" and "بلا شموع إدارة" in m]
+        self.assertTrue(warns and "NOPAIR" in warns[0], eng.hooks.logs)
+
+    def test_nothing_changes_when_every_held_coin_is_still_inside(self):
+        eng = self._engine()
+        coin = sorted(eng.signalable_universe(), key=lambda c: c.rank)[-1]
+        eng.paper.open_from_signal(self._signal(coin))
+        self.assertEqual(eng.held_outside_universe(), [])
+        self.assertFalse(any("خارج Top 100" in m for _, m in eng.hooks.logs))
 
 
 class TestLoggingSignature(TmpDbTestCase):
