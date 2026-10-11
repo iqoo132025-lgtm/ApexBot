@@ -309,7 +309,8 @@ class TestServer(Base):
             with urllib.request.urlopen(r, timeout=5) as resp:
                 return resp.status, resp.headers.get("Content-Type"), resp.read()
         except urllib.error.HTTPError as e:
-            return e.code, e.headers.get("Content-Type"), e.read()
+            with e:             # HTTPError يحمل رد الخادم: يُغلق هنا لا عند جمع القمامة
+                return e.code, e.headers.get("Content-Type"), e.read()
 
     def test_api_routes(self):
         pid = self.pos("AAA")["id"]
