@@ -3,11 +3,14 @@
 اختبارات جلب البيانات الحية — الحصص والمصادر ومنع السقوط الصامت على كاش قديم.
 شغّله: python3 -m apex_top100.tests.test_data_sources
 """
+import gc
+import http.server
 import io
 import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -157,6 +160,96 @@ class TestHttpCacheProvenance(unittest.TestCase):
         c.begin_cycle()
         self.assertFalse(c.circuit_open("https://api.coingecko.com/a"))
         self.assertEqual(dict(c.errors), {})
+
+
+class TestHttpErrorResponseIsClosed(unittest.TestCase):
+    """
+    خادم محلي حقيقي يعيد 500/429. HttpCache يغلق رد الخطأ فور التقاطه؛ بلا ذلك يبقى
+    الـsocket مفتوحاً بعد عودة fetch إلى أن يمرّ جامع القمامة.
+    """
+
+    def setUp(self):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                code = int(self.path.rsplit("/", 1)[-1])
+                body = b'{"error": "x"}'
+                self.send_response(code)
+                if code == 429:
+                    self.send_header("Retry-After", "7")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(self.srv.server_close)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.addCleanup(self.srv.shutdown)
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+
+        # urlopen الحقيقي يبقى؛ نحتفظ فقط بكل HTTPError يخرج منه، ونسجّل النوم بدل تنفيذه
+        self.raised, self.sleeps = [], []
+        real_urlopen = ds.urllib.request.urlopen
+
+        def spy(req, timeout=None):
+            try:
+                return real_urlopen(req, timeout=timeout)
+            except urllib.error.HTTPError as e:
+                self.raised.append(e)
+                raise
+
+        self.addCleanup(setattr, ds.urllib.request, "urlopen", real_urlopen)
+        self.addCleanup(setattr, ds.time, "sleep", ds.time.sleep)
+        ds.urllib.request.urlopen = spy
+        ds.time.sleep = self.sleeps.append
+
+        # الجامع معطّل: إن أُغلق الرد فبإغلاق صريح لا بجمع القمامة
+        self.addCleanup(gc.enable)
+        gc.disable()
+
+    def assertAllClosed(self, n):
+        self.assertEqual(len(self.raised), n)
+        for e in self.raised:
+            self.assertTrue(e.fp is None or e.fp.closed, f"رد {e.code} بقي مفتوحاً بعد عودة fetch")
+
+    def test_500_response_is_closed_when_fetch_returns(self):
+        c = HttpCache(cache_dir(), retries=1)
+        with self.assertRaises(RuntimeError) as cm:
+            c.fetch(f"{self.base}/500", cache_key="k", ttl=0)
+        self.assertAllClosed(1)
+        self.assertIn("HTTP Error 500", str(cm.exception))
+        self.assertEqual(c.errors["500"], 1)
+        self.assertEqual(self.sleeps, [1])
+
+    def test_429_keeps_status_headers_and_retry_after(self):
+        c = HttpCache(cache_dir(), retries=2, max_consecutive_429=5)
+        with self.assertRaises(RuntimeError) as cm:
+            c.fetch(f"{self.base}/429", cache_key="k", ttl=0)
+        self.assertAllClosed(2)
+        self.assertIn("HTTP Error 429", str(cm.exception))
+        self.assertEqual(c.errors["429"], 2)
+        self.assertEqual(self.sleeps, [7.0, 7.0], "Retry-After يُقرأ من الرد بعد إغلاقه")
+        for e in self.raised:
+            self.assertEqual(e.code, 429)
+            self.assertEqual(e.headers.get("Retry-After"), "7")
+
+    def test_repeated_429_still_opens_the_circuit(self):
+        c = HttpCache(cache_dir(), retries=5, max_consecutive_429=2)
+        with self.assertRaises(RuntimeError):
+            c.fetch(f"{self.base}/429", cache_key="k", ttl=0)
+        self.assertAllClosed(2)
+        self.assertTrue(c.circuit_open(f"{self.base}/other"))
+        self.assertEqual(self.sleeps, [7.0])
+
+    def test_stale_fallback_is_unchanged(self):
+        c = HttpCache(cache_dir(), retries=1)
+        c._write_cache("k", {"v": 1})
+        res = c.fetch(f"{self.base}/500", cache_key="k", ttl=0, allow_stale=True)
+        self.assertAllClosed(1)
+        self.assertEqual(res.provenance, "stale")
+        self.assertEqual(res.data, {"v": 1})
 
 
 def coin(symbol="SOL", coin_id="solana", rank=4):

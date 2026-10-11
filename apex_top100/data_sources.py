@@ -304,6 +304,9 @@ class HttpCache:
                     self._write_cache(cache_key, data)
                 return FetchResult(data, "fresh", 0.0)
             except urllib.error.HTTPError as e:
+                # الرد يحمل socket مفتوحاً وجسمه لا يُقرأ هنا: يُغلق الآن لا عند جمع
+                # القمامة. الكود والترويسات (Retry-After) تبقى مقروءة بعد الإغلاق.
+                e.close()
                 last_err = e
                 self.errors[str(e.code)] += 1
                 if e.code == 429:
